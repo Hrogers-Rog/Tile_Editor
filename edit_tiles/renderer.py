@@ -693,7 +693,7 @@ class DrawMixin:
 
                     # Rivers / Roads (FlowyThingBuilder) ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â polyline through points
                     if 'FlowyThing' in handler:
-                        pts = spl.get('points', [])
+                        pts = [pt for pt in spl.get('points', []) if isinstance(pt, dict)]
                         if len(pts) < 2:
                             continue
                         style = spl.get('style', '')
@@ -744,7 +744,7 @@ class DrawMixin:
 
                     # AutoTrestle ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â draw as a thick grey line between endpoints
                     elif 'AutoTrestle' in handler:
-                        pts = spl.get('points', [])
+                        pts = [pt for pt in spl.get('points', []) if isinstance(pt, dict)]
                         if len(pts) < 2:
                             continue
                         trestle_curve = []
@@ -830,6 +830,8 @@ class DrawMixin:
                         if not spl or 'points' not in spl:
                             continue
                         for pi, pt in enumerate(spl['points']):
+                            if not isinstance(pt, dict):
+                                continue
                             pos2 = pt.get('position', {})
                             spx, spy = self.unity_to_screen(
                                 pos2.get('x',0), pos2.get('z',0))

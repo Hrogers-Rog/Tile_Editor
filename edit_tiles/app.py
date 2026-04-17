@@ -2715,6 +2715,8 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
                 if source_only and active_source_idx is not None and getattr(layer, 'source_idx', None) != active_source_idx:
                     continue
                 for spl in layer.splineys.values():
+                    if not isinstance(spl, dict):
+                        continue
                     if 'FlowyThing' not in str(spl.get('handler', '')):
                         continue
                     if str(spl.get('style', 'Road')).lower() != style.lower():
@@ -2723,6 +2725,8 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
                     if profile:
                         profiles[profile] += 1
                     for pt in spl.get('points', []):
+                        if not isinstance(pt, dict):
+                            continue
                         try:
                             width = float(pt.get('width', 0.0))
                         except (TypeError, ValueError):
@@ -8380,6 +8384,8 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
                 if not spl or 'points' not in spl:
                     continue
                 for pi, pt in enumerate(spl['points']):
+                    if not isinstance(pt, dict):
+                        continue
                     pos = pt.get('position', {})
                     snx, sny = self.unity_to_screen(pos.get('x',0), pos.get('z',0))
                     d = ((snx-sx)**2+(sny-sy)**2)**0.5
@@ -8517,6 +8523,8 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
         if self.sel_spliney_pt >= len(pts):
             return
         pt = pts[self.sel_spliney_pt]
+        if not isinstance(pt, dict):
+            return
         pos = pt.get('position', {})
         rot = pt.get('rotation', {})
         width = pt.get('width', None)
@@ -8742,7 +8750,7 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
             elif key == 'spl_next':
                 li = self.sel_spliney_layer
                 if li is not None:
-                    spl = self.mod_project.layers[li].splineys.get(self.sel_spliney_id,{})
+                    spl = self.mod_project.layers[li].splineys.get(self.sel_spliney_id) or {}
                     n_pts = len(spl.get('points',[]))
                     self.sel_spliney_pt = min(n_pts-1, self.sel_spliney_pt+1)
                 self._spl_edit_key = ''
