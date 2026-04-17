@@ -388,7 +388,6 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
         self._spl_edit_key:         str     = ''
         self._spl_edit_buf:         str     = ''
         self._spl_rot_axis:         str     = 'y'
-        self.spliney_grade_pct:     float   = 0.0
         # --- Scenery placement ---
         self.scenery_panel:      bool       = False
         self.sel_scenery_id:     str | None = None
@@ -7806,19 +7805,19 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
         state = self._current_spliney_range_state()
         if state.get('ready'):
             self._clear_spliney_range_selection()
-            self._set_status("Spliney range cleared")
+            self._set_status("Width range cleared")
             return
         anchor_idx = state.get('anchor')
         if anchor_idx == self.sel_spliney_pt:
             self._clear_spliney_range_selection()
-            self._set_status("Spliney range start cleared")
+            self._set_status("Width range start cleared")
             return
         self.sel_spliney_range_id = self.sel_spliney_id
         self.sel_spliney_range_layer = self.sel_spliney_layer
         self.sel_spliney_range_anchor = int(self.sel_spliney_pt)
         self._set_status(
-            f"Spliney range start set at {self.sel_spliney_id}[{self.sel_spliney_pt}]  "
-            f"shift-click another point or use Prev/Next, then Fill Width or Grade"
+            f"Width range start set at {self.sel_spliney_id}[{self.sel_spliney_pt}]  "
+            f"shift-click another point or use Prev/Next and Fill Width"
         )
 
     def _spl_fill_width_range(self):
@@ -7827,7 +7826,7 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
             return
         state = self._current_spliney_range_state()
         if not state.get('ready'):
-            self._set_status("Mark a spliney range first")
+            self._set_status("Mark a width range first")
             return
         layer = self.mod_project.layers[li]
         spl = layer.splineys.get(self.sel_spliney_id)
@@ -7861,123 +7860,6 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
         self._save_flowy_spliney(layer, self.sel_spliney_id, updated)
         self._set_status(
             f"{self.sel_spliney_id}[{start_idx}..{end_idx}] width -> {float(width_value):.2f} m"
-        )
-
-    def _current_spliney_grade_pct(self) -> float:
-        if getattr(self, '_spl_edit_key', '') == 'spl_grade_pct':
-            raw = str(getattr(self, '_spl_edit_buf', '')).strip()
-            if raw:
-                try:
-                    return float(raw)
-                except ValueError:
-                    pass
-        return float(getattr(self, 'spliney_grade_pct', 0.0))
-
-    def _selected_spliney_grade_span(self):
-        layer, spl = self._selected_flowy_entry()
-        if not layer or not spl:
-            self._set_status("Select a road or river spliney first")
-            return None
-        points = copy.deepcopy(spl.get('points', []))
-        if len(points) < 2:
-            self._set_status("Spliney needs at least 2 points")
-            return None
-        range_state = self._current_spliney_range_state()
-        if range_state.get('ready'):
-            start_idx = int(range_state['start'])
-            end_idx = int(range_state['end'])
-        elif range_state.get('anchor') is not None:
-            self._set_status(
-                "Mark a second point for the spliney range, or clear the start to grade the whole spliney"
-            )
-            return None
-        else:
-            start_idx = 0
-            end_idx = len(points) - 1
-
-        nodes = []
-        for idx in range(start_idx, end_idx + 1):
-            pt = points[idx]
-            if not isinstance(pt, dict):
-                continue
-            pos = dict(pt.get('position', {}) or {})
-            try:
-                nodes.append({
-                    'id': idx,
-                    'x': float(pos.get('x', 0.0)),
-                    'y': float(pos.get('y', 0.0)),
-                    'z': float(pos.get('z', 0.0)),
-                })
-            except (TypeError, ValueError):
-                continue
-        if len(nodes) < 2:
-            self._set_status("Selected spliney span needs at least 2 valid points")
-            return None
-        return layer, spl, points, nodes, start_idx, end_idx
-
-    def _apply_spliney_y_results(self, layer, spliney_id: str, spl: dict, points: list, results: list):
-        updated_points = list(points)
-        for idx, new_y in results:
-            if not (0 <= idx < len(updated_points)):
-                continue
-            pt = updated_points[idx]
-            if not isinstance(pt, dict):
-                continue
-            pt = dict(pt)
-            pos = dict(pt.get('position', {}) or {})
-            pos['y'] = float(new_y)
-            pt['position'] = pos
-            updated_points[idx] = pt
-        updated = dict(spl)
-        updated['points'] = updated_points
-        self._save_flowy_spliney(layer, spliney_id, updated)
-        return updated_points
-
-    def _spliney_span_length(self, nodes: list) -> float:
-        import math as _math
-
-        return sum(
-            _math.sqrt(
-                (nodes[i]['x'] - nodes[i - 1]['x']) ** 2 +
-                (nodes[i]['z'] - nodes[i - 1]['z']) ** 2
-            )
-            for i in range(1, len(nodes))
-        )
-
-    def _spl_smooth_grade_range(self):
-        span = self._selected_spliney_grade_span()
-        if not span:
-            return
-        layer, spl, points, nodes, start_idx, end_idx = span
-        results = smooth_grade(nodes, fix_first=True, fix_last=True)
-        if len(results) < 2:
-            self._set_status("Not enough valid spliney points to smooth")
-            return
-        self._apply_spliney_y_results(layer, self.sel_spliney_id, spl, points, results)
-        total_dist = self._spliney_span_length(nodes)
-        y_vals = [float(y) for _, y in results]
-        self._set_status(
-            f"Grade smoothed: {self.sel_spliney_id}[{start_idx}..{end_idx}]  "
-            f"{total_dist:.1f} m  Y {y_vals[0]:.2f}->{y_vals[-1]:.2f} m"
-        )
-
-    def _spl_apply_grade_range(self):
-        span = self._selected_spliney_grade_span()
-        if not span:
-            return
-        layer, spl, points, nodes, start_idx, end_idx = span
-        grade_pct = self._current_spliney_grade_pct()
-        results = apply_grade_from_start(nodes, grade_pct=grade_pct, fix_first=True)
-        if len(results) < 2:
-            self._set_status("Not enough valid spliney points to grade")
-            return
-        self._apply_spliney_y_results(layer, self.sel_spliney_id, spl, points, results)
-        total_dist = self._spliney_span_length(nodes)
-        y_vals = [float(y) for _, y in results]
-        rise = y_vals[-1] - y_vals[0]
-        self._set_status(
-            f"Grade applied: {self.sel_spliney_id}[{start_idx}..{end_idx}]  "
-            f"{grade_pct:+.2f}% over {total_dist:.1f} m  rise/fall {rise:+.2f} m"
         )
 
     def _save_flowy_spliney(self, layer, spliney_id: str, spl: dict):
@@ -8665,32 +8547,26 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
         text_w = pw2 - 20
         header_text = f"Spliney Point: {self.sel_spliney_id}[{self.sel_spliney_pt}]"
         layer_text = f"Layer: {layer.label}  Handler: {spl.get('handler','').split('.')[-1]}"
-        tools_text = (
-            "Road/river point tools. Zoom in and click a control dot to edit another point. "
-            "Use Grade % with Smooth Grade or Apply Grade to reshape elevation."
-        )
+        tools_text = "Road/river point tools. Zoom in and click a control dot to edit another point."
         if range_state.get('ready'):
             range_text = (
-                f"Spliney range: {self.sel_spliney_id}[{range_state['start']}..{range_state['end']}]"
-                "  Set Width, then Fill Width, or use Grade tools."
+                f"Width range: {self.sel_spliney_id}[{range_state['start']}..{range_state['end']}]"
+                "  Set current Width, then Fill Width."
             )
             range_col = (255, 210, 110)
         elif range_state.get('anchor') is not None:
             range_text = (
-                f"Spliney range start: {self.sel_spliney_id}[{range_state['anchor']}]"
+                f"Width start: {self.sel_spliney_id}[{range_state['anchor']}]"
                 "  shift-click another point or use Prev/Next."
             )
             range_col = (255, 210, 110)
         else:
-            range_text = (
-                "Spliney range: Mark Start, then shift-click another point to fill widths or grade between them. "
-                "Without a marked range, grade tools affect the whole spliney."
-            )
+            range_text = "Width range: Mark Start, then shift-click another point to fill between them."
             range_col = (120, 140, 160)
 
-        field_rows = 7 + (1 if width is not None else 0)
+        field_rows = 6 + (1 if width is not None else 0)
         nudges = [(90,0.001),(45,0.01),(30,0.05),(15,0.1),(10,1),(5,5)]
-        action_rows = 4
+        action_rows = 3
 
         def wrap_lines_local(font_obj, text, max_w):
             text = str(text)
@@ -8768,7 +8644,6 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
         spl_field("RotZ", "spl_rotZ", f"{rot.get('z',0):.3f}",  (200,180,220))
         if width is not None:
             spl_field("Width","spl_width",f"{width:.2f}",        (220,200,160))
-        spl_field("Grade%", "spl_grade_pct", f"{float(getattr(self, 'spliney_grade_pct', 0.0)):+.3f}", (220, 210, 150))
 
         # Rotation axis picker + nudge row
         axis_x = cx2
@@ -8852,11 +8727,6 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
             ),
             ("Fill Width", "spl_fill_width_range", (0, 150, 110), bool(range_state.get('ready'))),
         ])
-        grade_enabled = len(pts) >= 2 and (range_state.get('ready') or range_state.get('anchor') is None)
-        draw_action_row([
-            ("Smooth Grade", "spl_smooth_grade", (0, 135, 160), grade_enabled),
-            (f"Apply {self._current_spliney_grade_pct():+.2f}%", "spl_apply_grade", (180, 120, 50), grade_enabled),
-        ])
 
     def _handle_spliney_props_click(self, mx, my, content_top) -> bool:
         """Handle clicks in the spliney properties panel."""
@@ -8898,10 +8768,6 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
                 self._toggle_spliney_range_anchor()
             elif key == 'spl_fill_width_range':
                 self._spl_fill_width_range()
-            elif key == 'spl_smooth_grade':
-                self._spl_smooth_grade_range()
-            elif key == 'spl_apply_grade':
-                self._spl_apply_grade_range()
             elif key.startswith('spl_rot_axis:'):
                 self._spl_rot_axis = key.split(':', 1)[1]
             elif key.startswith('splrot_'):
@@ -8938,13 +8804,6 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
 
     def _commit_spl_field(self, key: str, value: str):
         """Apply edited spliney field."""
-        if key == 'spl_grade_pct':
-            try:
-                self.spliney_grade_pct = float(value)
-            except ValueError:
-                return
-            self._set_status(f"Spliney grade target = {self.spliney_grade_pct:+.2f}%")
-            return
         li = self.sel_spliney_layer
         if li is None or not self.mod_project: return
         layer = self.mod_project.layers[li]
@@ -11476,8 +11335,8 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
                 )
                 if range_state_preview.get('ready'):
                     range_text_preview = (
-                        f"Spliney range: {range_state_preview['start']}..{range_state_preview['end']}  "
-                        "Set current Width, then Fill Width, or use Grade tools in the Spliney Panel."
+                        f"Width range: {range_state_preview['start']}..{range_state_preview['end']}  "
+                        "Set current Width, then Fill Width."
                     )
                 elif range_state_preview.get('anchor') is not None:
                     range_text_preview = (
@@ -11485,10 +11344,7 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
                         "shift-click another point or use Prev/Next."
                     )
                 else:
-                    range_text_preview = (
-                        "Spliney range: Mark Start, then shift-click another point. "
-                        "Width fill and Spliney Panel grade tools use that span."
-                    )
+                    range_text_preview = "Width range: Mark Start, then shift-click another point."
                 total += len(wrap_lines_local(self.font, current_selection_text, geo_text_w)) * guide_line_h
                 total += len(wrap_lines_local(self.font, range_text_preview, geo_text_w)) * guide_line_h
                 total += guide_row_h * 4
@@ -11699,8 +11555,8 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
                 )
                 if range_state.get('ready'):
                     range_text = (
-                        f"Spliney range: {range_state['start']}..{range_state['end']}  "
-                        "Set current Width, then Fill Width, or use Grade tools in the Spliney Panel."
+                        f"Width range: {range_state['start']}..{range_state['end']}  "
+                        "Set current Width, then Fill Width."
                     )
                     range_col = (255, 210, 110)
                 elif range_state.get('anchor') is not None:
@@ -11710,10 +11566,7 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
                     )
                     range_col = (255, 210, 110)
                 else:
-                    range_text = (
-                        "Spliney range: Mark Start, then shift-click another point. "
-                        "Width fill and Spliney Panel grade tools use that span."
-                    )
+                    range_text = "Width range: Mark Start, then shift-click another point."
                     range_col = (120, 140, 160)
                 draw_guide_wrapped(range_text, range_col)
                 bx_sel = cx
