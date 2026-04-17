@@ -2638,6 +2638,16 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
             return float(fallback) % 360.0
         return (math.degrees(math.atan2(dx, dz)) + 360.0) % 360.0
 
+    def _spliney_pitch_deg(self, start: dict, end: dict, fallback: float = 0.0) -> float:
+        dx = float(end.get('x', 0.0)) - float(start.get('x', 0.0))
+        dy = float(end.get('y', 0.0)) - float(start.get('y', 0.0))
+        dz = float(end.get('z', 0.0)) - float(start.get('z', 0.0))
+        run = math.hypot(dx, dz)
+        if run < 0.001:
+            return float(fallback)
+        # Project convention: negative rotX means uphill.
+        return -math.degrees(math.atan2(dy, run))
+
     def _spliney_candidate_layers(self, style: str | None = None) -> list[tuple[int, Layer]]:
         if not self.mod_project:
             return []
@@ -2930,21 +2940,25 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
                 'y': float(pos.get('y', 0.0)),
                 'z': float(pos.get('z', 0.0)),
             }
+            rot_x = float(rot.get('x', 0.0))
             if idx > 0 and idx + 1 < total:
                 prev_pos = dict(points[idx - 1].get('position', {}) or {})
                 next_pos = dict(points[idx + 1].get('position', {}) or {})
                 rot_y = self._spliney_heading_deg(prev_pos, next_pos, float(rot.get('y', 0.0)))
+                rot_x = self._spliney_pitch_deg(prev_pos, next_pos, rot_x)
             elif idx + 1 < total:
                 next_pos = dict(points[idx + 1].get('position', {}) or {})
                 rot_y = self._spliney_heading_deg(pos, next_pos, float(rot.get('y', 0.0)))
+                rot_x = self._spliney_pitch_deg(pos, next_pos, rot_x)
             elif idx > 0:
                 prev_pos = dict(points[idx - 1].get('position', {}) or {})
                 rot_y = self._spliney_heading_deg(prev_pos, pos, float(rot.get('y', 0.0)))
+                rot_x = self._spliney_pitch_deg(prev_pos, pos, rot_x)
             else:
                 rot_y = float(rot.get('y', 0.0)) % 360.0
             pt['position'] = pos
             pt['rotation'] = {
-                'x': float(rot.get('x', 0.0)),
+                'x': float(rot_x),
                 'y': float(rot_y),
                 'z': float(rot.get('z', 0.0)),
             }
@@ -3074,24 +3088,42 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
         pt = copy.deepcopy(points[idx])
         pos = dict(pt.get('position', {}) or {})
         rot = dict(pt.get('rotation', {}) or {})
-        fallback = float(rot.get('y', 0.0))
+        fallback_y = float(rot.get('y', 0.0))
+        fallback_x = float(rot.get('x', 0.0))
         if idx > 0 and idx + 1 < len(points):
             prev_pos = dict(points[idx - 1].get('position', {}) or {})
             next_pos = dict(points[idx + 1].get('position', {}) or {})
-            rot_y = self._spliney_heading_deg(prev_pos, next_pos, fallback)
+            rot_y = self._spliney_heading_deg(prev_pos, next_pos, fallback_y)
+            rot_x = self._spliney_pitch_deg(prev_pos, next_pos, fallback_x)
         elif idx + 1 < len(points):
             next_pos = dict(points[idx + 1].get('position', {}) or {})
-            rot_y = self._spliney_heading_deg(pos, next_pos, fallback)
+            rot_y = self._spliney_heading_deg(pos, next_pos, fallback_y)
+            rot_x = self._spliney_pitch_deg(pos, next_pos, fallback_x)
         elif idx > 0:
             prev_pos = dict(points[idx - 1].get('position', {}) or {})
-            rot_y = self._spliney_heading_deg(prev_pos, pos, fallback)
+            rot_y = self._spliney_heading_deg(prev_pos, pos, fallback_y)
+            rot_x = self._spliney_pitch_deg(prev_pos, pos, fallback_x)
         else:
-            rot_y = fallback % 360.0
-        rot['x'] = float(rot.get('x', 0.0))
+            rot_y = fallback_y % 360.0
+            rot_x = fallback_x
+        rot['x'] = float(rot_x)
         rot['y'] = float(rot_y)
         rot['z'] = float(rot.get('z', 0.0))
         pt['rotation'] = rot
         points[idx] = pt
+
+    def _solve_spliney_rotation_span(self, points: list, start_idx: int = 0, end_idx: int | None = None):
+        if not points:
+            return
+        last_idx = len(points) - 1
+        start = max(0, int(start_idx))
+        end = last_idx if end_idx is None else min(last_idx, int(end_idx))
+        if start > end:
+            return
+        solve_start = max(0, start - 1)
+        solve_end = min(last_idx, end + 1)
+        for idx in range(solve_start, solve_end + 1):
+            self._solve_spliney_point_rotation(points, idx)
 
     def _selected_flowy_extend_target(self, style: str):
         layer, spl = self._selected_flowy_entry()
@@ -7917,6 +7949,7 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
 
     def _apply_spliney_y_results(self, layer, spliney_id: str, spl: dict, points: list, results: list):
         updated_points = list(points)
+        touched = []
         for idx, new_y in results:
             if not (0 <= idx < len(updated_points)):
                 continue
@@ -7928,6 +7961,9 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
             pos['y'] = float(new_y)
             pt['position'] = pos
             updated_points[idx] = pt
+            touched.append(idx)
+        if touched:
+            self._solve_spliney_rotation_span(updated_points, min(touched), max(touched))
         updated = dict(spl)
         updated['points'] = updated_points
         self._save_flowy_spliney(layer, spliney_id, updated)
@@ -7980,6 +8016,20 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
             f"{grade_pct:+.2f}% over {total_dist:.1f} m  rise/fall {rise:+.2f} m"
         )
 
+    def _spl_auto_pitch_range(self):
+        span = self._selected_spliney_grade_span()
+        if not span:
+            return
+        layer, spl, points, nodes, start_idx, end_idx = span
+        self._solve_spliney_rotation_span(points, start_idx, end_idx)
+        updated = dict(spl)
+        updated['points'] = points
+        self._save_flowy_spliney(layer, self.sel_spliney_id, updated)
+        self._set_status(
+            f"Pitch solved: {self.sel_spliney_id}[{start_idx}..{end_idx}]  "
+            f"{self._spliney_span_length(nodes):.1f} m"
+        )
+
     def _save_flowy_spliney(self, layer, spliney_id: str, spl: dict):
         if 'splineys' not in layer._raw:
             layer._raw['splineys'] = {}
@@ -8012,7 +8062,9 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
             self._set_status("Spliney needs at least 2 points")
             return
         style = str(spl.get('style', 'Road'))
-        fitted_points, fit_meta = self._fit_flowy_points_to_terrain(points, style=style)
+        fitted_points, fit_meta = self._fit_flowy_points_to_terrain(
+            points, style=style, normalize_rotations=True
+        )
         updated = dict(spl)
         updated['points'] = fitted_points
         self._save_flowy_spliney(layer, self.sel_spliney_id, updated)
@@ -8667,7 +8719,7 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
         layer_text = f"Layer: {layer.label}  Handler: {spl.get('handler','').split('.')[-1]}"
         tools_text = (
             "Road/river point tools. Zoom in and click a control dot to edit another point. "
-            "Use Grade % with Smooth Grade or Apply Grade to reshape elevation."
+            "Use Grade % with Smooth Grade or Apply Grade to reshape elevation, or Auto Pitch to tilt along the span."
         )
         if range_state.get('ready'):
             range_text = (
@@ -8856,6 +8908,7 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
         draw_action_row([
             ("Smooth Grade", "spl_smooth_grade", (0, 135, 160), grade_enabled),
             (f"Apply {self._current_spliney_grade_pct():+.2f}%", "spl_apply_grade", (180, 120, 50), grade_enabled),
+            ("Auto Pitch", "spl_auto_pitch", (90, 130, 200), grade_enabled),
         ])
 
     def _handle_spliney_props_click(self, mx, my, content_top) -> bool:
@@ -8902,6 +8955,8 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
                 self._spl_smooth_grade_range()
             elif key == 'spl_apply_grade':
                 self._spl_apply_grade_range()
+            elif key == 'spl_auto_pitch':
+                self._spl_auto_pitch_range()
             elif key.startswith('spl_rot_axis:'):
                 self._spl_rot_axis = key.split(':', 1)[1]
             elif key.startswith('splrot_'):
@@ -9030,6 +9085,7 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
         if new_y:
             pos['y'] = new_y; pt['position'] = pos
             pts[pi] = pt; spl['points'] = pts
+            self._solve_spliney_rotation_span(pts, pi, pi)
             if 'splineys' in layer._raw:
                 layer._raw['splineys'][self.sel_spliney_id] = spl
             layer.dirty = True; layer.save()
@@ -9050,22 +9106,8 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
         if pi < 0 or pi >= len(pts) or len(pts) < 2:
             return
 
-        def pos_at(idx):
-            return dict(pts[idx].get('position', {}))
-
-        pt = dict(pts[pi])
-        rot = dict(pt.get('rotation', {}))
-        fallback = float(rot.get('y', 0.0))
-        if pi > 0 and pi + 1 < len(pts):
-            rot_y = self._spliney_heading_deg(pos_at(pi - 1), pos_at(pi + 1), fallback)
-        elif pi + 1 < len(pts):
-            rot_y = self._spliney_heading_deg(pos_at(pi), pos_at(pi + 1), fallback)
-        else:
-            rot_y = self._spliney_heading_deg(pos_at(pi - 1), pos_at(pi), fallback)
-
-        rot['y'] = float(rot_y)
-        pt['rotation'] = rot
-        pts[pi] = pt
+        self._solve_spliney_point_rotation(pts, pi)
+        rot_y = float(dict(pts[pi].get('rotation', {}) or {}).get('y', 0.0))
         spl['points'] = pts
         if 'splineys' in layer._raw:
             layer._raw['splineys'][self.sel_spliney_id] = spl
