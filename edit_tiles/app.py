@@ -94,9 +94,17 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
 
     def __init__(self, folders=None):
         print("[__init__] pygame.init...", flush=True)
+        os.environ.setdefault("SDL_VIDEO_CENTERED", "1")
         pygame.init()
         pygame.freetype.init()
-        self.screen = pygame.display.set_mode((WIN_W, WIN_H), pygame.RESIZABLE)
+        display_info = pygame.display.Info()
+        display_w = int(getattr(display_info, 'current_w', 0) or WIN_W)
+        display_h = int(getattr(display_info, 'current_h', 0) or WIN_H)
+        window_w = min(WIN_W, max(800, display_w - 120))
+        window_h = min(WIN_H, max(600, display_h - 140))
+        window_w = min(window_w, display_w)
+        window_h = min(window_h, display_h)
+        self.screen = pygame.display.set_mode((window_w, window_h), pygame.RESIZABLE)
         pygame.display.set_caption("Terrain Tile Editor")
         self.folders = folders if isinstance(folders, list) else ([folders] if folders else [])
         self.track_graph_path: Path | None = None

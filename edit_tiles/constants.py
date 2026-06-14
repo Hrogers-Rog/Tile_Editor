@@ -35,7 +35,7 @@ VEG_NAMES = [
     "Grassland+Bush", "Open Grassland", "Pasture", "Crops/Developed",
 ]
 
-WIN_W, WIN_H = 1920, 1080
+WIN_W, WIN_H = 1440, 900
 PANEL_H       = 76          # top nav bar (two rows: 38px each)
 TOOLBAR_H     = 52          # second row: mode + brush controls
 EDIT_PANEL_H  = TOOLBAR_H   # alias kept for compat
