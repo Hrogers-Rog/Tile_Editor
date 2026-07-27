@@ -1,6 +1,9 @@
 """edit_tiles.terrain — Tile data class, coordinate helpers, brush math."""
 import math
+import os
+import shutil
 import struct
+import time
 from pathlib import Path
 
 import numpy as np
@@ -42,6 +45,7 @@ class Tile:
         self.full_w = full_w
         self.path = path          # source file path for saving
         self.dirty = False        # modified since last save
+        self._backup_path = None
 
         # Float32 height buffer — authoritative for painting.
         # r/g are kept in sync and used for rendering/saving.
@@ -114,11 +118,9 @@ class Tile:
         self._scaled_mode_cached = None
         self._scaled_hs_cached = None
 
-    def save(self):
-        """Write modified data back to source PNG."""
-        if self.path is None:
-            print(f"Tile ({self.x},{self.y}) has no path, cannot save.")
-            return False
+    def write_copy(self, path):
+        """Write current tile pixels to ``path`` without changing dirty state."""
+        path = Path(path)
         res = self.full_w
         r2d = self.r.reshape(res, res)
         g2d = self.g.reshape(res, res)
@@ -126,9 +128,32 @@ class Tile:
         a2d = self.a.reshape(res, res)
         rgba = np.stack([r2d, g2d, b2d, a2d], axis=2)
         img = Image.fromarray(rgba, 'RGBA')
-        img.save(self.path, format='PNG')
+        img.save(path, format='PNG')
+        return True
+
+    def save(self):
+        """Write modified data back to source PNG."""
+        if self.path is None:
+            print(f"Tile ({self.x},{self.y}) has no path, cannot save.")
+            return False
+        path = Path(self.path)
+        if self._backup_path is None and path.exists():
+            backup = Path(
+                str(path)
+                + ".tile-editor-backup-"
+                + time.strftime("%Y%m%d-%H%M%S")
+            )
+            shutil.copy2(path, backup)
+            self._backup_path = backup
+        temporary = Path(str(path) + ".tile-editor.tmp")
+        try:
+            self.write_copy(temporary)
+            os.replace(temporary, path)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
         self.dirty = False
-        print(f"Saved tile ({self.x},{self.y}) → {self.path}")
+        print(f"Saved tile ({self.x},{self.y}) -> {self.path}")
         return True
 
 

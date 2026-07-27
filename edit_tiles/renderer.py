@@ -749,7 +749,27 @@ class DrawMixin:
                             continue
                         trestle_curve = []
                         for i in range(len(pts) - 1):
-                            curve = _flowy_segment_points(pts[i], pts[i + 1])
+                            # New trestles contain dense samples taken directly
+                            # from the rail segment's 3D Bezier. Draw those
+                            # samples as the centerline so the desktop preview
+                            # cannot bow away from the rail by applying another
+                            # independent spline. Preserve cubic rendering for
+                            # legacy two-point trestles.
+                            if len(pts) > 2:
+                                pos0 = pts[i].get('position', {}) or {}
+                                pos1 = pts[i + 1].get('position', {}) or {}
+                                curve = [
+                                    (
+                                        float(pos0.get('x', 0.0)),
+                                        float(pos0.get('z', 0.0)),
+                                    ),
+                                    (
+                                        float(pos1.get('x', 0.0)),
+                                        float(pos1.get('z', 0.0)),
+                                    ),
+                                ]
+                            else:
+                                curve = _flowy_segment_points(pts[i], pts[i + 1])
                             if len(curve) < 2:
                                 continue
                             screen_curve = [self.unity_to_screen(x2, z2) for x2, z2 in curve]
@@ -972,6 +992,67 @@ class DrawMixin:
 
     def _draw_selection_highlight(self, w, h, content_top):
         """Selection rectangle highlight."""
+        # Scenery is represented by an origin/heading marker because the editor
+        # does not have access to the game's rendered prefab meshes.
+        scenery_id = getattr(self, 'sel_scenery_id', None)
+        if scenery_id and self.mod_project:
+            scenery = self.mod_project.merged_scenery.get(scenery_id)
+            if isinstance(scenery, dict):
+                position = scenery.get('position', {}) or {}
+                rotation = scenery.get('rotation', {}) or {}
+                scale = scenery.get('scale', {}) or {}
+                sx, sy = self.unity_to_screen(
+                    float(position.get('x', 0.0)),
+                    float(position.get('z', 0.0)),
+                )
+                hidden_by_panel = False
+                if getattr(self, 'scenery_panel', False):
+                    panel_w = min(w - 40, 860)
+                    panel_h = min(h - content_top - STATUS_H - 20, 560)
+                    panel_rect = pygame.Rect(
+                        (w - panel_w) // 2,
+                        content_top + 10,
+                        panel_w,
+                        panel_h,
+                    )
+                    hidden_by_panel = panel_rect.collidepoint(sx, sy)
+                if (
+                    not hidden_by_panel
+                    and -30 <= sx <= w + 30
+                    and content_top - 30 <= sy <= h + 30
+                ):
+                    uniform_scale = float(scale.get('x', 1.0))
+                    marker_r = max(7, min(16, int(7 + uniform_scale * 2)))
+                    diamond = [
+                        (sx, sy - marker_r),
+                        (sx + marker_r, sy),
+                        (sx, sy + marker_r),
+                        (sx - marker_r, sy),
+                    ]
+                    pygame.draw.polygon(self.screen, (0, 0, 0), diamond)
+                    pygame.draw.polygon(self.screen, (210, 120, 255), diamond, 3)
+                    pygame.draw.circle(self.screen, (255, 255, 255), (sx, sy), 3)
+
+                    rot_y = float(rotation.get('y', 0.0))
+                    angle = math.radians(rot_y)
+                    tip = (
+                        int(sx + math.sin(angle) * 25),
+                        int(sy - math.cos(angle) * 25),
+                    )
+                    pygame.draw.line(
+                        self.screen, (255, 255, 255), (sx, sy), tip, 4
+                    )
+                    pygame.draw.line(
+                        self.screen, (210, 120, 255), (sx, sy), tip, 2
+                    )
+                    model = scenery.get('modelIdentifier', '?')
+                    self.font.render_to(
+                        self.screen,
+                        (sx + marker_r + 5, sy - marker_r),
+                        f"{model}  {scenery_id}",
+                        (230, 190, 255),
+                    )
+
         # ---- Selection highlight + properties panel ----
         if (self.sel_mod_node_id or self.sel_mod_seg_id) and not self.mod_panel:
             li    = self.sel_mod_layer_idx
@@ -1287,6 +1368,77 @@ class DrawMixin:
         """Node-place, measure, connect, and drag cursors."""
         self._draw_measure_guides(w, h, content_top)
         map_bottom = self._profile_panel_top() if getattr(self, 'profile_panel', False) else h
+
+        # Scenery placement ghost. The prefab itself is rendered by the game,
+        # so show its origin, heading, transform, and model identifier here.
+        if (
+            getattr(self, 'scenery_place_mode', False)
+            and self.mod_project
+            and getattr(self, 'scenery_place_model', '')
+        ):
+            mx0, my0 = pygame.mouse.get_pos()
+            over_panel = False
+            if getattr(self, 'scenery_panel', False):
+                panel_w = min(w - 40, 860)
+                panel_h = min(h - content_top - STATUS_H - 20, 560)
+                panel_rect = pygame.Rect(
+                    (w - panel_w) // 2,
+                    content_top + 10,
+                    panel_w,
+                    panel_h,
+                )
+                over_panel = panel_rect.collidepoint(mx0, my0)
+            if content_top < my0 < map_bottom and not over_panel:
+                ux, uz = self.screen_to_unity(mx0, my0)
+                uy = self._sample_terrain_y(ux, uz)
+                csx, csy = self.unity_to_screen(ux, uz)
+                scale = float(getattr(self, 'scenery_place_scale', 1.0))
+                marker_r = max(7, min(16, int(7 + scale * 2)))
+                diamond = [
+                    (csx, csy - marker_r),
+                    (csx + marker_r, csy),
+                    (csx, csy + marker_r),
+                    (csx - marker_r, csy),
+                ]
+                pygame.draw.polygon(self.screen, (0, 0, 0), diamond)
+                pygame.draw.polygon(self.screen, (100, 255, 170), diamond, 3)
+                pygame.draw.circle(self.screen, (255, 255, 255), (csx, csy), 3)
+
+                rot_y = float(getattr(self, 'scenery_place_rotY', 0.0))
+                angle = math.radians(rot_y)
+                tip = (
+                    int(csx + math.sin(angle) * 28),
+                    int(csy - math.cos(angle) * 28),
+                )
+                pygame.draw.line(
+                    self.screen, (255, 255, 255), (csx, csy), tip, 4
+                )
+                pygame.draw.line(
+                    self.screen, (100, 255, 170), (csx, csy), tip, 2
+                )
+
+                lines = [
+                    self.scenery_place_model,
+                    (
+                        f"({ux:.1f}, {uy:.1f}, {uz:.1f})  "
+                        f"Y {rot_y:.0f} deg  {scale:.2f}x"
+                    ),
+                    "[ / ] rotate   Up / Down scale   click to place",
+                ]
+                for idx, line_text in enumerate(lines):
+                    color = (
+                        (160, 255, 200)
+                        if idx == 0
+                        else (225, 200, 255)
+                        if idx == 1
+                        else (180, 180, 130)
+                    )
+                    self.font.render_to(
+                        self.screen,
+                        (csx + marker_r + 7, csy - 14 + idx * 14),
+                        line_text,
+                        color,
+                    )
 
         # Node place mode cursor
         if getattr(self, '_geo_node_place_mode', False) and self.mod_project:

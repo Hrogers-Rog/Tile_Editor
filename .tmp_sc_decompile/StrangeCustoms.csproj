@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>StrangeCustoms</AssemblyName>
+    <GenerateAssemblyInfo>False</GenerateAssemblyInfo>
+    <TargetFramework>net48</TargetFramework>
+  </PropertyGroup>
+  <PropertyGroup>
+    <LangVersion>15.0</LangVersion>
+    <AllowUnsafeBlocks>True</AllowUnsafeBlocks>
+    <CheckForOverflowUnderflow>False</CheckForOverflowUnderflow>
+  </PropertyGroup>
+  <PropertyGroup />
+  <ItemGroup />
+  <ItemGroup>
+    <Reference Include="Assembly-CSharp" />
+    <Reference Include="UnityEngine.CoreModule" />
+    <Reference Include="Serilog" />
+    <Reference Include="UnityEngine.AudioModule" />
+    <Reference Include="UnityEngine.UnityWebRequestModule" />
+    <Reference Include="0Harmony" />
+    <Reference Include="Newtonsoft.Json" />
+    <Reference Include="Definition" />
+    <Reference Include="Railloader.Interchange" />
+    <Reference Include="Map.Runtime" />
+    <Reference Include="Unity.TextMeshPro" />
+    <Reference Include="System.Core" />
+    <Reference Include="Ops" />
+    <Reference Include="KeyValue.Runtime" />
+    <Reference Include="UnityEngine.PhysicsModule" />
+    <Reference Include="SimpleGraph.Runtime" />
+    <Reference Include="System.IO.Compression" />
+    <Reference Include="UnityEngine.ImageConversionModule" />
+    <Reference Include="UnityEngine.IMGUIModule" />
+    <Reference Include="System.IO.Compression.FileSystem" />
+    <Reference Include="UnityEngine.UnityWebRequestAudioModule" />
+    <Reference Include="UnityEngine.UI" />
+  </ItemGroup>
+</Project>

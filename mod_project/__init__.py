@@ -37,7 +37,9 @@ from .constants import (
 )
 
 # ── Layer ──────────────────────────────────────────────────────────────────
-from .layer import Layer, _load_json, _save_json
+from .layer import (
+    Layer, TRACK_GAUGES, normalize_track_gauge, _load_json, _save_json,
+)
 
 # ── Project ────────────────────────────────────────────────────────────────
 from .project import ModProject
@@ -61,6 +63,7 @@ from .geometry import (
     segments_for_node, node_valency, next_marker_id,
     # Track generators
     generate_curve, generate_straight, generate_parallel_tracks, generate_turnout,
+    turnout_leg_pose, turnout_radius_for_chord,
     generate_wye,
     # Node / segment utilities
     node_flatten, node_reverse, node_set_rotY, segment_set_props,
@@ -87,7 +90,7 @@ from .helpers import (
     # Texts
     text_set, text_delete,
     # Trestle
-    create_trestle_from_segment,
+    create_trestle_from_segment, fit_trestle_to_segment,
     # Group move
     move_group,
     # Mandela
@@ -100,6 +103,10 @@ from .helpers import (
 
 # ── Validation ─────────────────────────────────────────────────────────────
 from .validation import validate_mod, export_clean_zip
+from .vertical import (
+    build_vertical_alignment,
+    dense_vertical_alignment_stations,
+)
 
 # ── Code generation ────────────────────────────────────────────────────────
 from .codegen import (
@@ -114,7 +121,8 @@ __all__ = [
     'LAYER_BASE', 'LAYER_GRAPH', 'LAYER_TOWN', 'LAYER_RIVERS',
     'LAYER_MIGRATION', 'LAYER_OTHER', 'LAYER_COLORS', 'TOWN_PALETTE',
     'TRACK_CLASS_NAMES', 'TRACK_CLASS_JSON', 'TRACK_CLASS_DEFAULT_SPEED',
-    'TRACK_STYLES', 'TRACK_GROUP_NOTES', 'TRACK_MARKER_TYPES', 'SIMPLE_GRAPH_TAGS',
+    'TRACK_STYLES', 'TRACK_GAUGES', 'normalize_track_gauge',
+    'TRACK_GROUP_NOTES', 'TRACK_MARKER_TYPES', 'SIMPLE_GRAPH_TAGS',
     'SIGNAL_ASPECTS', 'SIGNAL_HEAD_CONFIGS', 'SIGNAL_DIRECTIONS', 'CTC_DIRECTIONS',
     'SWITCH_FILTERS', 'AI_HEURISTIC_COSTS', 'CTC_KEY_FORMATS',
     # Core classes
@@ -126,6 +134,7 @@ __all__ = [
     'segment_length', 'segment_grade', 'segment_curve_degrees',
     'segments_for_node', 'node_valency', 'next_marker_id',
     'generate_curve', 'generate_straight', 'generate_parallel_tracks', 'generate_turnout',
+    'turnout_leg_pose', 'turnout_radius_for_chord',
     'generate_wye',
     'node_flatten', 'node_reverse', 'node_set_rotY', 'segment_set_props',
     'quad_bezier',
@@ -137,12 +146,13 @@ __all__ = [
     'next_spliney_id', 'spliney_insert_point', 'spliney_delete_point',
     'turntable_set', 'scenery_set', 'scenery_delete', 'next_scenery_id',
     'load_set', 'load_delete', 'text_set', 'text_delete',
-    'create_trestle_from_segment', 'move_group',
+    'create_trestle_from_segment', 'fit_trestle_to_segment', 'move_group',
     'mandela_set', 'mandela_delete', 'next_mandela_id',
     'simple_graph_node_set', 'simple_graph_node_delete', 'simple_graph_delete',
     'flip_segment', 'migration_set',
     # Validation
     'validate_mod', 'export_clean_zip',
+    'build_vertical_alignment', 'dense_vertical_alignment_stations',
     # Code generation
     'bulletin_manifest_json', 'generate_csharp_template',
     'generate_harmony_patch', 'generate_umm_entry',

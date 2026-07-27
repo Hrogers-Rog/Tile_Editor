@@ -1,5 +1,0 @@
-pygame-ce
-numpy
-Pillow
-requests
-scipy

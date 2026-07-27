@@ -1,0 +1,11 @@
+{
+  "Id": "Hrogers.TileEditorBridge",
+  "DisplayName": "Hrogers Tile Editor Bridge",
+  "Author": "Hrogers",
+  "Version": "0.16.4",
+  "ManagerVersion": "0.27.10",
+  "Game": "Railroader",
+  "AssemblyName": "Hrogers.TileEditorBridge.dll",
+  "EntryMethod": "Hrogers.TileEditorBridge.Main.Load",
+  "HomePage": ""
+}

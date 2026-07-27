@@ -9,8 +9,9 @@ from typing import Optional
 
 from .layer import Layer
 from .geometry import (
-    _rand_chars, _bezier_for_nodes, _bezier_length_gauss,
-    _bezier_tangent_factor, _cubic_split,
+    _rand_chars, _bezier_length_gauss,
+    _bezier_tangent_factor, _bezier_control_points,
+    _cubic_point, _cubic_deriv, _cubic_split,
     segment_length, segments_for_node,
     _heading_to_vec,
 )
@@ -170,7 +171,8 @@ def merge_nodes(graph_layer: 'Layer', merged_nodes: dict,
                             s0.get('style', 'Standard'),
                             s0.get('speedLimit', 0),   # 0 = use class default, not 45
                             s0.get('priority', 0),
-                            s0.get('groupId', ''))
+                            s0.get('groupId', ''),
+                            s0.get('gauge', 'Standard'))
     graph_layer.delete_segment(s0['id'])
     graph_layer.delete_segment(s1['id'])
     graph_layer.delete_node(middle_node_id)
@@ -207,7 +209,8 @@ def split_node(graph_layer: 'Layer', merged_nodes: dict,
                             s.get('style', 'Standard'),
                             s.get('speedLimit', 0),   # 0 = use class default, not 45
                             s.get('priority', 0),
-                            s.get('groupId', ''))
+                            s.get('groupId', ''),
+                            s.get('gauge', 'Standard'))
     return new_nid
 
 
@@ -394,11 +397,15 @@ def scenery_set(layer: 'Layer', scenery_id: str,
 
 
 def scenery_delete(layer: 'Layer', scenery_id: str):
-    """Delete a scenery object from a layer."""
-    layer.scenery.pop(scenery_id, None)
-    if 'scenery' in layer._raw:
-        layer._raw['scenery'].pop(scenery_id, None)
+    """Write a mixinto deletion marker for a scenery object."""
+    if layer.read_only:
+        return False
+    layer.scenery[scenery_id] = None
+    if 'scenery' not in layer._raw:
+        layer._raw['scenery'] = {}
+    layer._raw['scenery'][scenery_id] = None
     layer.dirty = True
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -475,6 +482,95 @@ def text_delete(layer: 'Layer', text_id: str):
 # ---------------------------------------------------------------------------
 # Trestle / spliney generators
 # ---------------------------------------------------------------------------
+def _trestle_points_for_segment(seg: dict, merged_nodes: dict,
+                                 deck_offset_y: float = -0.3) -> list:
+    """Sample the exact 3D rail Bezier for an AutoTrestleBuilder spliney."""
+    n0 = merged_nodes.get(seg.get('startId', ''))
+    n1 = merged_nodes.get(seg.get('endId', ''))
+    if not n0 or not n1:
+        return []
+
+    start_rot_x = float(n0.get('rotX', 0.0) or 0.0)
+    start_rot_y = float(n0.get('rotY', 0.0) or 0.0)
+    start_rot_z = float(n0.get('rotZ', 0.0) or 0.0)
+    end_rot_x = float(n1.get('rotX', 0.0) or 0.0)
+    end_rot_y = float(n1.get('rotY', 0.0) or 0.0)
+    end_rot_z = float(n1.get('rotZ', 0.0) or 0.0)
+
+    curve_node0 = {
+        'x': float(n0['x']),
+        'y': float(n0['y']),
+        'z': float(n0['z']),
+        'rotX': start_rot_x,
+        'rotY': start_rot_y,
+    }
+    curve_node1 = {
+        'x': float(n1['x']),
+        'y': float(n1['y']),
+        'z': float(n1['z']),
+        'rotX': end_rot_x,
+        'rotY': end_rot_y,
+    }
+    p0, p1, p2, p3 = _bezier_control_points(curve_node0, curve_node1)
+    curve_length = _bezier_length_gauss(p0, p1, p2, p3)
+
+    # AutoTrestle joins its control points with its own spline. Sampling the
+    # actual 3D rail cubic every ~8 m keeps the bridge deck on the rail curve
+    # through both horizontal curves and vertical crests/sags. The previous
+    # endpoint/linear-height approximation could cut visibly across a curve.
+    sample_count = max(2, min(65, int(_math.ceil(curve_length / 8.0)) + 1))
+
+    points = []
+    for sample_idx in range(sample_count):
+        t = sample_idx / max(1, sample_count - 1)
+        px, py, pz = _cubic_point(p0, p1, p2, p3, t)
+        dx, dy, dz = _cubic_deriv(p0, p1, p2, p3, t)
+        horizontal = _math.hypot(dx, dz)
+        if horizontal < 1e-7 and abs(dy) < 1e-7:
+            heading = start_rot_y if sample_idx == 0 else end_rot_y
+            rot_x = start_rot_x if sample_idx == 0 else end_rot_x
+        else:
+            heading = (_math.degrees(_math.atan2(dx, dz))) % 360.0
+            rot_x = _math.degrees(_math.atan2(-dy, max(horizontal, 1e-7)))
+
+        # Interpolate roll over the shortest angular path. Roll does not alter
+        # the centerline, but retaining it keeps the bridge deck orientation
+        # consistent with superelevated track.
+        roll_delta = ((end_rot_z - start_rot_z + 180.0) % 360.0) - 180.0
+        rot_z = start_rot_z + roll_delta * t
+        points.append({
+            'position': {
+                'x': px,
+                'y': py + float(deck_offset_y),
+                'z': pz,
+            },
+            'rotation': {'x': rot_x, 'y': heading, 'z': rot_z},
+        })
+    return points
+
+
+def fit_trestle_to_segment(layer: 'Layer', spliney_id: str, seg: dict,
+                            merged_nodes: dict,
+                            deck_offset_y: float = -0.3) -> bool:
+    """Refit an existing AutoTrestle spliney to a track segment."""
+    entry = layer.splineys.get(spliney_id)
+    if not entry or 'AutoTrestle' not in str(entry.get('handler', '')):
+        return False
+    points = _trestle_points_for_segment(
+        seg, merged_nodes, deck_offset_y=deck_offset_y
+    )
+    if len(points) < 2:
+        return False
+    updated = _copy.deepcopy(entry)
+    updated['points'] = points
+    if 'splineys' not in layer._raw:
+        layer._raw['splineys'] = {}
+    layer._raw['splineys'][spliney_id] = updated
+    layer.splineys[spliney_id] = _copy.deepcopy(updated)
+    layer.dirty = True
+    return True
+
+
 def create_trestle_from_segment(layer: 'Layer', seg: dict,
                                  merged_nodes: dict,
                                  id_prefix: str = 'TRS',
@@ -489,76 +585,12 @@ def create_trestle_from_segment(layer: 'Layer', seg: dict,
       'bent'     -- angled abutment at each end (default, most common)
       'straight' -- vertical cut at each end
     """
-    import math as _math
-    n0 = merged_nodes.get(seg.get('startId', ''))
-    n1 = merged_nodes.get(seg.get('endId', ''))
-    if not n0 or not n1:
+    points = _trestle_points_for_segment(seg, merged_nodes)
+    if len(points) < 2:
         return ''
 
     # ID
     trs_id = f"{id_prefix}_{_rand_chars()}"
-
-    start_rot_x = float(n0.get('rotX', 0.0) or 0.0)
-    start_rot_y = float(n0.get('rotY', 0.0) or 0.0)
-    start_rot_z = float(n0.get('rotZ', 0.0) or 0.0)
-    end_rot_x = float(n1.get('rotX', 0.0) or 0.0)
-    end_rot_y = float(n1.get('rotY', 0.0) or 0.0)
-    end_rot_z = float(n1.get('rotZ', 0.0) or 0.0)
-
-    bezier_pts = _bezier_for_nodes(
-        {
-            'x': float(n0['x']),
-            'y': float(n0['y']),
-            'z': float(n0['z']),
-            'rotX': start_rot_x,
-            'rotY': start_rot_y,
-        },
-        {
-            'x': float(n1['x']),
-            'y': float(n1['y']),
-            'z': float(n1['z']),
-            'rotX': end_rot_x,
-            'rotY': end_rot_y,
-        },
-    )
-    if len(bezier_pts) < 2:
-        bezier_pts = [(float(n0['x']), float(n0['z'])), (float(n1['x']), float(n1['z']))]
-
-    sample_count = min(7, max(3, int(len(bezier_pts) / 6)))
-    sample_indices = sorted({
-        int(round(i * (len(bezier_pts) - 1) / max(1, sample_count - 1)))
-        for i in range(sample_count)
-    })
-
-    cumulative = [0.0]
-    for idx in range(1, len(bezier_pts)):
-        px0, pz0 = bezier_pts[idx - 1]
-        px1, pz1 = bezier_pts[idx]
-        cumulative.append(cumulative[-1] + _math.hypot(px1 - px0, pz1 - pz0))
-    total_len = cumulative[-1]
-
-    points = []
-    for list_idx, curve_idx in enumerate(sample_indices):
-        px, pz = bezier_pts[curve_idx]
-        prev_idx = max(0, curve_idx - 1)
-        next_idx = min(len(bezier_pts) - 1, curve_idx + 1)
-        hx0, hz0 = bezier_pts[prev_idx]
-        hx1, hz1 = bezier_pts[next_idx]
-        if next_idx == prev_idx:
-            if list_idx == 0:
-                heading = start_rot_y
-            else:
-                heading = end_rot_y
-        else:
-            heading = (_math.degrees(_math.atan2(hx1 - hx0, hz1 - hz0))) % 360.0
-        t = (cumulative[curve_idx] / total_len) if total_len > 0.001 else (list_idx / max(1, len(sample_indices) - 1))
-        y = float(n0['y']) + (float(n1['y']) - float(n0['y'])) * t
-        rot_x = start_rot_x + (end_rot_x - start_rot_x) * t
-        rot_z = start_rot_z + (end_rot_z - start_rot_z) * t
-        points.append({
-            'position': {'x': px, 'y': y - 0.3, 'z': pz},
-            'rotation': {'x': rot_x, 'y': heading, 'z': rot_z},
-        })
 
     entry = {
         'handler':   'StrangeCustoms.AutoTrestleBuilder',
@@ -974,6 +1006,7 @@ def flip_segment(layer: 'Layer', seg_id: str):
         seg.get('speedLimit', 0),
         seg.get('priority', 0),
         seg.get('groupId', ''),
+        seg.get('gauge', 'Standard'),
     )
     return True
 

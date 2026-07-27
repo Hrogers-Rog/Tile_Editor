@@ -4,6 +4,7 @@ TileEditor.handle_event() routes pygame events to these methods.
 """
 import math
 import pygame
+from mod_project import _bezier_control_points
 from .pygame_dialogs import (ask_directory, ask_open_filename,
                              ask_save_filename, ask_string,
                              ask_integer, ask_yes_no)
@@ -384,6 +385,29 @@ class EventsMixin:
         if getattr(self,'_scenery_edit_model',False) and self._handle_scenery_keydown(event):
             return True
 
+        # Fast scenery placement adjustments while the cursor is over the map.
+        if self.scenery_place_mode:
+            if event.key in (pygame.K_LEFT, pygame.K_LEFTBRACKET):
+                self.scenery_place_rotY = (self.scenery_place_rotY - 15.0) % 360.0
+                self._set_status(f"Scenery rotation {self.scenery_place_rotY:.0f} deg")
+                return True
+            if event.key in (pygame.K_RIGHT, pygame.K_RIGHTBRACKET):
+                self.scenery_place_rotY = (self.scenery_place_rotY + 15.0) % 360.0
+                self._set_status(f"Scenery rotation {self.scenery_place_rotY:.0f} deg")
+                return True
+            if event.key == pygame.K_UP:
+                self.scenery_place_scale = min(
+                    10.0, round(self.scenery_place_scale + 0.1, 2)
+                )
+                self._set_status(f"Scenery scale {self.scenery_place_scale:.2f}x")
+                return True
+            if event.key == pygame.K_DOWN:
+                self.scenery_place_scale = max(
+                    0.1, round(self.scenery_place_scale - 0.1, 2)
+                )
+                self._set_status(f"Scenery scale {self.scenery_place_scale:.2f}x")
+                return True
+
         # Span field keyboard input
         if getattr(self,'_span_edit_key',None) and self._handle_span_keydown(event):
             return True
@@ -529,6 +553,7 @@ class EventsMixin:
                     if self.bridge:
                         self.bridge.stop()
                     self.bridge = RailroaderBridge(game_dir=folder)
+                    self._configure_bridge(self.bridge)
                     self.bridge.on_state_update = self._on_bridge_state
                     self.bridge.on_connect    = lambda: self._set_status("Bridge: connected")
                     self.bridge.on_disconnect = lambda: self._set_status("Bridge: disconnected")
@@ -666,6 +691,13 @@ class EventsMixin:
                 for rect, action in getattr(self, '_shell_action_rects', []):
                     if rect.collidepoint(mx, my):
                         return self._run_shell_action(action)
+                return True
+
+        # ---- Geometry panel scroll ----
+        if self.geo_panel and event.button in (4, 5):
+            geo_rect = getattr(self, '_geo_panel_rect', None)
+            if geo_rect and geo_rect.collidepoint(mx, my):
+                self._scroll_geo_panel(-1 if event.button == 4 else 1)
                 return True
 
         # ---- Progression/Area panel scroll ----
@@ -1347,7 +1379,8 @@ class EventsMixin:
                                        n_b.get('rotZ',0), n_b.get('flipSwitchStand',False))
                     sid2 = self.mod_project.next_seg_id()
                     graph.set_segment(sid2, nid, snap_node,
-                                      'Mainline','Standard',45,0,'')
+                                      'Mainline','Standard',45,0,'',
+                                      getattr(self, 'geo_gauge', 'Standard'))
                     self.mod_project._rebuild_merge()
                     graph.save()
                     if self.bridge: self.bridge.reload_tracks(str(graph.path))
@@ -1358,6 +1391,21 @@ class EventsMixin:
             elif snap_seg and self.mod_project and moved > 2:
                 seg_id2, seg_li = snap_seg
                 shift_held = pygame.key.get_mods() & pygame.KMOD_SHIFT
+                if shift_held:
+                    turnout_error = self._turnout_settings_error()
+                    if turnout_error:
+                        self._set_status(turnout_error)
+                        self.dragging_node = False
+                        self.drag_node_id = None
+                        self.drag_node_origin = None
+                        self._drag_snap_node = None
+                        self._drag_snap_seg = None
+                        return True
+                self._push_undo(
+                    f"turnout {nid} into {seg_id2}"
+                    if shift_held else
+                    f"insert {nid} into {seg_id2}"
+                )
 
                 # Snap node position onto the segment line first (no save yet)
                 import math as _ms
@@ -1373,26 +1421,31 @@ class EventsMixin:
                             t = max(0,min(1,((ux2-n0s['x'])*dx2+(uz2-n0s['z'])*dz2)/(seg_len*seg_len)))
                             snap_x = n0s['x'] + t*dx2
                             snap_z = n0s['z'] + t*dz2
-                            snap_y = self._sample_terrain_y(snap_x, snap_z) or n0s['y']
+                            p0, p1, p2, p3 = _bezier_control_points(n0s, n1s)
+                            omt = 1.0 - t
+                            snap_y = (
+                                omt**3 * p0[1]
+                                + 3.0 * omt**2 * t * p1[1]
+                                + 3.0 * omt * t**2 * p2[1]
+                                + t**3 * p3[1]
+                            )
                             # Write position directly without save/rebuild
                             graph2 = self.mod_project.get_graph_layer()
                             if graph2:
                                 nd2 = self.mod_project.merged_nodes.get(nid, {})
                                 seg_rotY = self._bezier_tangent_rotY(n0s, n1s, t)
+                                seg_rotX = self._bezier_tangent_rotX(n0s, n1s, t)
                                 graph2.set_node(nid, snap_x, snap_y, snap_z,
-                                               nd2.get('rotX',0), seg_rotY,
+                                               seg_rotX, seg_rotY,
                                                nd2.get('rotZ',0),
                                                nd2.get('flipSwitchStand',False))
 
                 if shift_held:
-                    self._push_undo(f"turnout {nid} into {seg_id2}")
-                    self._insert_node_into_segment(nid, seg_id2)
-                    self._add_turnout_leg(nid)
+                    self._insert_turnout_into_segment(nid, seg_id2)
                     # Select the switch node so it's visible
                     self.sel_mod_node_id = nid
                     self.sel_mod_seg_id  = None
                 else:
-                    self._push_undo(f"insert {nid} into {seg_id2}")
                     self._insert_node_into_segment(nid, seg_id2)
 
             elif moved > 2:

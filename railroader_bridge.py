@@ -55,7 +55,7 @@ class BridgeNode:
 
 class BridgeSegment:
     __slots__ = ('id','startId','endId','trackClass','style',
-                 'priority','speedLimit','groupId')
+                 'priority','speedLimit','groupId','gauge')
     def __init__(self, d: dict):
         self.id         = d.get('id','')
         self.startId    = d.get('startId','')
@@ -65,6 +65,7 @@ class BridgeSegment:
         self.priority   = int(d.get('priority', 0))
         self.speedLimit = int(d.get('speedLimit', 45))
         self.groupId    = d.get('groupId', None)
+        self.gauge      = d.get('gauge', 'Standard')
 
 
 class BridgeCar:
@@ -169,6 +170,7 @@ def build_mixinto(
             'priority':  s.get('priority', 0),
             'speedLimit': s.get('speedLimit', 0),
             'groupId':   s.get('groupId', ''),
+            'gauge':     s.get('gauge', 'Standard'),
         }
 
     return {
@@ -213,11 +215,33 @@ def write_mixinto(path: str,
 # ---------------------------------------------------------------------------
 def _railroader_path_candidates() -> List[Path]:
     """Return likely Railroader install locations for the current platform."""
-    if platform.system() == 'Linux':
-        return [Path('~/.steam/debian-installation/steamapps/common/Railroader').expanduser()]
+    candidates = []
 
-    if platform.system() == 'Windows':
-        candidates = []
+    # The packaged launcher sets this from its installed location:
+    # Railroader/Mods/<mod>/Launch Tile Editor.bat. This is authoritative
+    # and never depends on a developer or another user's directory.
+    configured = os.environ.get('TILE_EDITOR_GAME_DIR', '').strip()
+    if configured:
+        candidates.append(Path(configured).expanduser())
+
+    # Infer the game root from this module as a fallback when Python is
+    # launched directly instead of through the packaged batch file.
+    try:
+        module_path = Path(__file__).resolve()
+        for parent in module_path.parents:
+            if ((parent / 'Mods').is_dir()
+                    and (parent / 'Railroader_Data').is_dir()):
+                candidates.append(parent)
+                break
+    except (OSError, RuntimeError):
+        pass
+
+    if platform.system() == 'Linux':
+        candidates.append(
+            Path('~/.steam/debian-installation/steamapps/common/Railroader')
+            .expanduser()
+        )
+    elif platform.system() == 'Windows':
         steam_roots = [
             Path(os.environ.get('PROGRAMFILES(X86)', 'C:/Program Files (x86)')) / 'Steam',
             Path(os.environ.get('PROGRAMFILES', 'C:/Program Files')) / 'Steam',
@@ -227,16 +251,26 @@ def _railroader_path_candidates() -> List[Path]:
             candidates.append(root / 'steamapps' / 'common' / 'Railroader')
         for drive in 'DEFGH':
             candidates.append(Path(f'{drive}:/SteamLibrary/steamapps/common/Railroader'))
-        return candidates
+    else:
+        candidates.append(Path.home())
 
-    return [Path.home()]
+    unique = []
+    seen = set()
+    for candidate in candidates:
+        normalized = os.path.normcase(os.path.abspath(os.fspath(candidate)))
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        unique.append(candidate)
+    return unique
 
 
 def preferred_railroader_path() -> Path:
     """Return the best default Railroader path for the current platform."""
     candidates = _railroader_path_candidates()
     for candidate in candidates:
-        if candidate.exists():
+        if ((candidate / 'Mods').is_dir()
+                and (candidate / 'Railroader_Data').is_dir()):
             return candidate
     return candidates[0]
 
@@ -244,7 +278,8 @@ def preferred_railroader_path() -> Path:
 def _default_railroader_path() -> Optional[Path]:
     """Try to find the Railroader game directory automatically."""
     for candidate in _railroader_path_candidates():
-        if candidate.exists():
+        if ((candidate / 'Mods').is_dir()
+                and (candidate / 'Railroader_Data').is_dir()):
             return candidate
     return None
 
@@ -264,24 +299,41 @@ class RailroaderBridge:
     def __init__(self, game_dir: Optional[str] = None, poll_interval: float = 1.5):
         if game_dir:
             self._game_dir = Path(game_dir)
+            self._game_dir_configured = True
         else:
             found = _default_railroader_path()
             self._game_dir = found or Path('.')
+            self._game_dir_configured = found is not None
 
         self._state_file   = self._game_dir / 'Mods' / 'TrackBridge' / 'bridge_state.json'
         self._command_file = self._game_dir / 'Mods' / 'TrackBridge' / 'bridge_commands.json'
+        # Supplemental Tile Editor channel. These files deliberately sit
+        # beside (rather than replace) the original TrackBridge protocol.
+        self._editor_state_file = (
+            self._game_dir / 'Mods' / 'TrackBridge' / 'editor_state.json'
+        )
+        self._editor_command_file = (
+            self._game_dir / 'Mods' / 'TrackBridge' / 'editor_commands.json'
+        )
+        self._game_panel_state_file = (
+            self._game_dir / 'Mods' / 'TrackBridge' / 'game_panel_state.json'
+        )
         self._poll_interval = poll_interval
 
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._last_mtime: float = 0.0
         self._last_state: Optional[BridgeState] = None
+        self._last_editor_command_id: Optional[str] = None
+        self._last_game_panel_mtime: float = 0.0
+        self._game_panel_state: dict = {}
         self._lock = threading.Lock()
 
         # Callbacks — set these before calling start()
         self.on_state_update:  Optional[Callable[[BridgeState], None]] = None
         self.on_connect:       Optional[Callable[[], None]] = None
         self.on_disconnect:    Optional[Callable[[], None]] = None
+        self.on_editor_command: Optional[Callable[[dict], None]] = None
 
         self._connected = False
 
@@ -302,8 +354,25 @@ class RailroaderBridge:
     @game_dir.setter
     def game_dir(self, p):
         self._game_dir = Path(p)
+        self._game_dir_configured = True
         self._state_file   = self._game_dir / 'Mods' / 'TrackBridge' / 'bridge_state.json'
         self._command_file = self._game_dir / 'Mods' / 'TrackBridge' / 'bridge_commands.json'
+        self._editor_state_file = (
+            self._game_dir / 'Mods' / 'TrackBridge' / 'editor_state.json'
+        )
+        self._editor_command_file = (
+            self._game_dir / 'Mods' / 'TrackBridge' / 'editor_commands.json'
+        )
+        self._game_panel_state_file = (
+            self._game_dir / 'Mods' / 'TrackBridge' / 'game_panel_state.json'
+        )
+        self._last_game_panel_mtime = 0.0
+        self._game_panel_state = {}
+
+    @property
+    def game_panel_state(self) -> dict:
+        with self._lock:
+            return dict(self._game_panel_state)
 
     # ------------------------------------------------------------------
     def start(self):
@@ -337,9 +406,35 @@ class RailroaderBridge:
         """Tell the game to hot-reload a mixinto file immediately."""
         self.send_command('reload_tracks', mixinto_path)
 
+    def reload_terrain_tiles(self, paths):
+        """Tell the in-game editor to reload terrain tiles saved on desktop."""
+        cleaned = [
+            str(Path(path))
+            for path in (paths or [])
+            if str(path or '').strip()
+        ]
+        if cleaned:
+            self.send_command(
+                'reload_terrain_tiles',
+                '\n'.join(cleaned))
+
     def ping(self):
         """Check if the bridge is alive (appears in game log)."""
         self.send_command('ping')
+
+    def publish_editor_state(self, state: dict):
+        """Publish a compact desktop-editor heartbeat for the in-game panel."""
+        if not self._game_dir_configured:
+            return False
+        data = dict(state or {})
+        data.setdefault('protocolVersion', 1)
+        data['timestamp'] = int(time.time() * 1000)
+        tmp = str(self._editor_state_file) + '.tmp'
+        os.makedirs(self._editor_state_file.parent, exist_ok=True)
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, separators=(',', ':'))
+        os.replace(tmp, str(self._editor_state_file))
+        return True
 
     # ------------------------------------------------------------------
     def write_mixinto(self, path: str,
@@ -358,10 +453,10 @@ class RailroaderBridge:
         # The mod writes every 1s; we allow 8s to handle Windows file caching
         # and File.Move() not always updating mtime immediately.
         STALE_SECS = 8.0
-        _last_content_hash = None
-
         while not self._stop_event.is_set():
             try:
+                self._try_load_editor_command()
+                state_fresh = False
                 if self._state_file.exists():
                     stat  = self._state_file.stat()
                     mtime = stat.st_mtime
@@ -376,24 +471,35 @@ class RailroaderBridge:
                         self._last_size  = size
                         self._try_load_state()
 
-                    # Connected if file is fresh OR if we just got new content
-                    now_connected = age < STALE_SECS
-                    if now_connected and not self._connected:
-                        self._connected = True
-                        if self.on_connect:
-                            try: self.on_connect()
-                            except Exception: pass
-                    elif not now_connected and self._connected:
-                        self._connected = False
-                        if self.on_disconnect:
-                            try: self.on_disconnect()
-                            except Exception: pass
-                else:
-                    if self._connected:
-                        self._connected = False
-                        if self.on_disconnect:
-                            try: self.on_disconnect()
-                            except Exception: pass
+                    state_fresh = age < STALE_SECS
+
+                # The compact UMM panel supplies its own heartbeat even when
+                # the optional full graph-state TrackBridge is not installed.
+                panel_fresh = self._file_is_fresh(
+                    self._game_panel_state_file, STALE_SECS
+                )
+                if panel_fresh:
+                    panel_mtime = (
+                        self._game_panel_state_file.stat().st_mtime
+                    )
+                    if panel_mtime != self._last_game_panel_mtime:
+                        self._last_game_panel_mtime = panel_mtime
+                        self._try_load_game_panel_state()
+                now_connected = state_fresh or panel_fresh
+                if now_connected and not self._connected:
+                    self._connected = True
+                    if self.on_connect:
+                        try:
+                            self.on_connect()
+                        except Exception:
+                            pass
+                elif not now_connected and self._connected:
+                    self._connected = False
+                    if self.on_disconnect:
+                        try:
+                            self.on_disconnect()
+                        except Exception:
+                            pass
 
             except Exception as _e:
                 # Log unexpected errors so they're visible during development.
@@ -404,6 +510,70 @@ class RailroaderBridge:
                 print(f"[RailroaderBridge] watch_loop error: {_e}", file=sys.stderr)
 
             self._stop_event.wait(self._poll_interval)
+
+    @staticmethod
+    def _file_is_fresh(path: Path, max_age_seconds: float) -> bool:
+        try:
+            return (
+                path.exists()
+                and (time.time() - path.stat().st_mtime) < max_age_seconds
+            )
+        except OSError:
+            return False
+
+    def _try_load_editor_command(self):
+        """Load one new panel request without replaying a stale command file."""
+        if not self._editor_command_file.exists():
+            return
+        try:
+            text = self._editor_command_file.read_text(encoding='utf-8')
+            data = json.loads(text)
+            if not isinstance(data, dict):
+                return
+            command_id = str(
+                data.get('requestId')
+                or data.get('sentAt')
+                or ''
+            )
+            if not command_id or command_id == self._last_editor_command_id:
+                return
+            self._last_editor_command_id = command_id
+
+            # Do not replay an old click when the desktop editor starts.
+            sent_at = int(data.get('sentAt', 0) or 0)
+            if sent_at and (int(time.time() * 1000) - sent_at) > 120_000:
+                return
+            if self.on_editor_command:
+                try:
+                    self.on_editor_command(data)
+                except Exception:
+                    pass
+        except (
+            json.JSONDecodeError,
+            UnicodeDecodeError,
+            OSError,
+            TypeError,
+            ValueError,
+        ):
+            # A replace may be in flight. The next poll will retry it.
+            pass
+
+    def _try_load_game_panel_state(self):
+        try:
+            data = json.loads(
+                self._game_panel_state_file.read_text(
+                    encoding='utf-8')
+            )
+            if isinstance(data, dict):
+                with self._lock:
+                    self._game_panel_state = data
+        except (
+            json.JSONDecodeError,
+            UnicodeDecodeError,
+            OSError,
+            TypeError,
+        ):
+            pass
 
     def _try_load_state(self):
         try:
@@ -463,6 +633,7 @@ def bridge_segment_to_track_dict(seg: BridgeSegment) -> dict:
         'priority':   seg.priority,
         'speedLimit': seg.speedLimit,
         'groupId':    seg.groupId,
+        'gauge':      seg.gauge,
     }
 
 

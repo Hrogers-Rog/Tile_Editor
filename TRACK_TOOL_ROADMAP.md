@@ -15,6 +15,99 @@ The editor should help with three things:
 - Reuse existing selection and panel patterns where possible.
 - Build shared path/stationing helpers first so later tools reuse the same math.
 
+## Phase 0: AMM Output Stability And Core Editing
+
+This phase comes before adding more drafting tools. A workflow is not complete
+until the edit is visible, undoable, saved in the correct AMM graph format,
+validated, and optionally hot-reloaded.
+
+### Completed Foundation
+
+- New nodes become visible immediately after placement.
+- New map mods default to RailLoader `Definition.json` manifests.
+- Auto Save OFF defers both disk writes and TrackBridge reload commands.
+- Live bridge geometry refreshes when existing nodes move or rotate.
+- Core add, connect, move, delete, property, split, merge, and undo actions
+  share one merge, cache, save, and hot-reload path.
+- Scenery placement writes the correct Y rotation and uniform scale, shows a
+  live placement ghost, highlights the selected object, and supports undo.
+- Grade chains support parabolic entry and exit transitions around a held
+  grade, with a purple Profile preview and synchronized node elevation/pitch.
+- Geometry panels scroll when the Profile dock reduces their available height.
+- Regression tests cover RailLoader output, core track edits, scenery
+  transforms, vertical-curve math/pitch, undo, and bridge behavior.
+- The compact `Hrogers.TileEditorBridge` UMM panel now reports desktop editor,
+  project/layer, Geo, selection, track, scenery, and save status. It remotely
+  prepares Geo/Scenery tools, focuses the editor, undoes, and saves/reloads
+  through the existing TrackBridge folder.
+- Regular turnouts and wyes use exact circular-chord placement, preserve
+  approach grade/pitch, validate minimum radii, and avoid four-route wyes.
+- Shift-inserting a turnout splits the selected segment and adds the diverging
+  leg as one save/undo transaction.
+- The desktop app remains the complete editing UI. RailLoader remains the
+  manifest for Strange Customs/AMM map data.
+
+### Next Work
+
+1. Add end-to-end coverage for split, merge, turnout, insert, and geometry
+   preview commits.
+2. Run graph validation before hot reload and show actionable errors in the UI.
+3. Add recovery tests for `.bak` files and deferred/manual saves.
+4. Add scenery move/duplicate, snap, axis-specific scale, and model-library
+   tools.
+5. Add automatic node insertion at vertical-curve boundaries when the selected
+   chain is too sparse to represent the requested profile exactly.
+6. Replace silent exception handling in editing paths with visible diagnostics.
+7. Break the largest `TileEditor` responsibilities into focused services only
+   after behavior is protected by tests.
+8. Add command acknowledgements and protocol-version diagnostics to the compact
+   bridge panel after live in-game testing.
+
+## Gauge And Turntable Architecture
+
+### Gauge Editing — Implemented
+
+- Keep one canonical editor value per segment: `Standard`, `Narrow`,
+  `DualGauge`, `DualGauge_L`, `DualGauge_R`, or `DualGauge_T`.
+- Write the value as optional `gauge` metadata in portable RailLoader graphs.
+  RailLoader ignores it; FUSE retains it for `FUSE.NarrowGauge`.
+- Preserve unknown future gauge strings and all unrelated segment fields
+  during routine edits.
+- Let every track builder inherit the active gauge, while split/merge/rename
+  operations inherit the source segment's gauge.
+- Show gauge-specific overlay colors and allow applying a gauge to one segment
+  or across a degree-two through chain.
+- Read and write native FUSE `FuseDataFiles` without changing native endpoint
+  fields or removal semantics.
+
+### Turntables — Next Operational Track Tool
+
+Turntables are graph operations, not ordinary scenery. The planned workspace
+will:
+
+1. Place the center at the mouse pointer and preview the pit, bridge axis, and
+   every generated pit connection.
+2. Expose radius, yaw, subdivisions, bridge length, vertical offset, and
+   `Standard` or three-foot bridge gauge in the primary panel.
+3. Put roundhouse stalls, start/stall angle, track length, prefab choices,
+   controller type, and custom visual identifiers under Advanced.
+4. Generate deterministic pit-node IDs so ordinary track can snap to and
+   reconnect with the turntable after later edits.
+5. Offer two explicit save backends:
+   - Portable legacy turntable data for RailLoader/Strange Customs, which FUSE
+     can convert.
+   - Native `operations.turntables` for FUSE custom visuals and controllers,
+     including the RLW narrow-gauge pit and bridge assets.
+6. Never silently write both backends for the same table until duplicate
+   conversion behavior has been verified. The UI will show the chosen runtime
+   compatibility before Build.
+
+FUSE currently exposes one numeric `bridgeTrackGauge`, so the first
+operational release should support standard- or narrow-gauge bridges. A true
+three-rail dual-gauge bridge needs a verified custom visual/controller and
+Narrow Gauge companion contract; it should not be faked as a normal
+single-gauge bridge.
+
 ## Editor Surface Plan
 - `Measure` becomes a top-toolbar tool button that opens a compact measurement/stationing panel.
 - `Geo` grows into the main plan-view drafting panel for straights, arcs, fits, and alignment cleanup.
@@ -126,6 +219,8 @@ Once straights are under control, the next pain point is curves:
 6. Benchmark pins / target profile references.
 7. Cut/fill shading.
 8. Grade-break warnings and vertical smoothness checks.
+9. Parabolic entry/exit grade transitions with held-grade control.
+10. Grade-aware node pitch (`rotX`) updates.
 
 ### Why Third
 This phase solves the hidden `Y` problem directly.

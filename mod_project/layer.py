@@ -18,6 +18,43 @@ from .constants import (
 from .geometry import _bezier_for_nodes
 
 
+TRACK_GAUGES = (
+    'Standard',
+    'Narrow',
+    'DualGauge',
+    'DualGauge_L',
+    'DualGauge_R',
+    'DualGauge_T',
+)
+
+
+def normalize_track_gauge(value) -> str:
+    """Return the canonical NarrowGauge/FUSE metadata value.
+
+    Unknown non-empty values are retained verbatim so a newer companion mod
+    can round-trip through an older Tile Editor without losing metadata.
+    """
+    raw = str(value or '').strip()
+    if not raw or raw.lower() in ('standard', 'std'):
+        return 'Standard'
+    aliases = {
+        '3ft': 'Narrow',
+        '3 ft': 'Narrow',
+        'threefoot': 'Narrow',
+        'three foot': 'Narrow',
+        'dual': 'DualGauge',
+        'mixed': 'DualGauge',
+        'mixedgauge': 'DualGauge',
+    }
+    alias = aliases.get(raw.lower())
+    if alias:
+        return alias
+    for gauge in TRACK_GAUGES:
+        if raw.lower() == gauge.lower():
+            return gauge
+    return raw
+
+
 def _load_json(path: Path) -> dict:
     """Load JSON tolerantly: strips C-style comments and trailing commas."""
     text = path.read_text(encoding='utf-8-sig')
@@ -91,13 +128,18 @@ class Layer:
 
         # Raw JSON data (what gets saved)
         self._raw: dict  = {}
+        self.track_schema = 'legacy'
+        self._original_track_node_ids = set()
+        self._original_track_segment_ids = set()
+        self._created_track_node_ids = set()
+        self._created_track_segment_ids = set()
 
         # Parsed node/segment data for rendering
         # Each node: {id, x, y, z, rotY, flipSwitchStand, deleted}
         # deleted=True means this layer has null for this id (deletion patch)
         self.nodes:    Dict[str, dict] = {}
         # Each segment: {id, startId, endId, trackClass, style, speedLimit,
-        #                priority, groupId, deleted}
+        #                priority, groupId, gauge, deleted}
         self.segments: Dict[str, dict] = {}
         # Splineys (rivers, roads, trestles, labels, turntables)
         self.splineys: Dict[str, dict] = {}
@@ -127,8 +169,32 @@ class Layer:
         except Exception as e:
             print(f"[layer] failed to load {self.path.name}: {e}")
             self._raw = {}
+        self.track_schema = self._detect_track_schema()
+        tracks = self._raw.get('tracks') or {}
+        self._original_track_node_ids = set(
+            (tracks.get('nodes') or {}).keys()
+        )
+        self._original_track_segment_ids = set(
+            (tracks.get('segments') or {}).keys()
+        )
+        self._created_track_node_ids.clear()
+        self._created_track_segment_ids.clear()
         self._check_patch_operators()
         self._parse()
+
+    def _detect_track_schema(self) -> str:
+        tracks = self._raw.get('tracks') or {}
+        segments = tracks.get('segments') or {}
+        for segment in segments.values():
+            if isinstance(segment, dict) and (
+                    'startNodeId' in segment or 'endNodeId' in segment):
+                return 'fuse'
+        if (
+            self.path.name.lower().endswith('.fuse.json')
+            and ('schemaVersion' in self._raw or 'tracks' in self._raw)
+        ):
+            return 'fuse'
+        return 'legacy'
 
     def _check_patch_operators(self):
         """Warn if this file uses StrangeCustoms patch operators ($find, $replace, etc.).
@@ -193,8 +259,14 @@ class Layer:
                 self.segments[sid] = {
                     'id':         sid,
                     'deleted':    False,
-                    'startId':    v.get('startId', v.get('StartId', '')),
-                    'endId':      v.get('endId',   v.get('EndId',   '')),
+                    'startId':    v.get(
+                        'startId',
+                        v.get('StartId', v.get('startNodeId', ''))
+                    ),
+                    'endId':      v.get(
+                        'endId',
+                        v.get('EndId', v.get('endNodeId', ''))
+                    ),
                     'trackClass': TRACK_CLASS_NAMES.get(tc_raw, 'Mainline'),
                     'style':      v.get('Style',      v.get('style',      'Standard')),
                     'speedLimit': int(v.get('speedLimit', v.get('SpeedLimit', 0))),
@@ -202,6 +274,9 @@ class Layer:
                     # groupId: real mods write "" for no group; null/absent also valid.
                     # Normalise to '' so set_segment round-trips cleanly.
                     'groupId':    v.get('groupId', v.get('GroupId')) or '',
+                    'gauge':      normalize_track_gauge(
+                        v.get('gauge', v.get('Gauge', 'Standard'))
+                    ),
                 }
 
     def rebuild_curves(self, all_nodes: dict):
@@ -219,6 +294,13 @@ class Layer:
             'Bridge':   ( 80, 160, 255),     # blue
             'Tunnel':   (220,  50,  50),     # red
         }
+        GAUGE_COLORS = {
+            'Narrow':      (255, 122,  20),
+            'DualGauge':   (110, 184, 255),
+            'DualGauge_L': (110, 184, 255),
+            'DualGauge_R': (110, 184, 255),
+            'DualGauge_T': (245,  64, 210),
+        }
         for seg in self.segments.values():
             if seg['deleted']:
                 continue
@@ -232,7 +314,12 @@ class Layer:
             base_color = TRACK_COLORS.get(seg['trackClass'], (220, 220, 100))
             style_key  = (seg.get('style') or 'Standard').capitalize()
             style_col  = STYLE_COLORS.get(style_key)
-            if style_col is not None:
+            gauge_col = GAUGE_COLORS.get(
+                normalize_track_gauge(seg.get('gauge', 'Standard'))
+            )
+            if gauge_col is not None:
+                color = gauge_col
+            elif style_col is not None:
                 color = style_col
             else:
                 color = base_color
@@ -245,6 +332,12 @@ class Layer:
         """Add or update a node in this layer."""
         if self.read_only:
             return
+        if (
+            self.track_schema == 'fuse'
+            and nid not in self._original_track_node_ids
+            and nid not in ((self._raw.get('tracks') or {}).get('nodes') or {})
+        ):
+            self._created_track_node_ids.add(nid)
         import math as _m
         # Guard against NaN/Inf coordinates which crash the game physics
         def _safe(v, default=0.0):
@@ -272,6 +365,7 @@ class Layer:
             'rotation': {'x': rotX, 'y': rotY, 'z': rotZ},
             'flipSwitchStand': flip,
         }
+        self._remove_fuse_track_removal('nodes', nid)
         self.dirty = True
 
     def delete_node(self, nid: str):
@@ -281,14 +375,30 @@ class Layer:
         self.nodes[nid] = {'id': nid, 'deleted': True, 'x': 0, 'y': 0, 'z': 0, 'rotY': 0}
         if 'tracks' not in self._raw: self._raw['tracks'] = {}
         if 'nodes' not in self._raw['tracks']: self._raw['tracks']['nodes'] = {}
-        self._raw['tracks']['nodes'][nid] = None
+        if self.track_schema == 'fuse':
+            self._raw['tracks']['nodes'].pop(nid, None)
+            if nid in self._created_track_node_ids:
+                self._created_track_node_ids.discard(nid)
+            elif nid not in self._original_track_node_ids:
+                self._add_fuse_track_removal('nodes', nid)
+        else:
+            self._raw['tracks']['nodes'][nid] = None
         self.dirty = True
 
     def set_segment(self, sid: str, start_id: str, end_id: str,
                     track_class: str = 'Mainline', style: str = 'Standard',
-                    speed_limit: Optional[int] = 0, priority: int = 0, group_id: str = ''):
+                    speed_limit: Optional[int] = 0, priority: int = 0,
+                    group_id: str = '', gauge: Optional[str] = None):
         if self.read_only:
             return
+        if (
+            self.track_schema == 'fuse'
+            and sid not in self._original_track_segment_ids
+            and sid not in (
+                ((self._raw.get('tracks') or {}).get('segments') or {})
+            )
+        ):
+            self._created_track_segment_ids.add(sid)
         # Guard: never create a self-loop
         if start_id == end_id:
             print(f"[layer] WARNING: refused self-loop segment {sid} ({start_id} -> {end_id})")
@@ -317,24 +427,68 @@ class Layer:
         if speed_limit is None:
             existing = self.segments.get(sid, {})
             speed_limit = existing.get('speedLimit', 0)
+        # An omitted gauge means "keep what this segment already has". This
+        # makes every pre-gauge editor action safe without forcing all callers
+        # to understand companion-mod metadata.
+        existing_segment = self.segments.get(sid, {})
+        existing_raw = (
+            ((self._raw.get('tracks') or {}).get('segments') or {}).get(sid)
+        )
+        if gauge is None:
+            gauge = existing_segment.get('gauge')
+            if gauge is None and isinstance(existing_raw, dict):
+                gauge = existing_raw.get('gauge', existing_raw.get('Gauge'))
+        gauge = normalize_track_gauge(gauge)
         self.segments[sid] = {
             'id': sid, 'deleted': False,
             'startId': start_id, 'endId': end_id,
             'trackClass': track_class, 'style': style_norm,
             'speedLimit': speed_limit, 'priority': priority,
-            'groupId': group_id,
+            'groupId': group_id, 'gauge': gauge,
         }
         if 'tracks' not in self._raw: self._raw['tracks'] = {}
         if 'segments' not in self._raw['tracks']: self._raw['tracks']['segments'] = {}
-        self._raw['tracks']['segments'][sid] = {
-            'startId':    start_id,
-            'endId':      end_id,
-            'trackClass': TRACK_CLASS_JSON.get(track_class, track_class),
-            'Style':      style_norm,
-            'speedLimit': speed_limit,
-            'priority':   priority,
-            'groupId':    group_id,
-        }
+        # Update a copy instead of replacing the object. Gauge, tags, and
+        # future FUSE/companion fields must survive routine property edits.
+        raw_segment = (
+            _copy.deepcopy(existing_raw)
+            if isinstance(existing_raw, dict) else {}
+        )
+        if self.track_schema == 'fuse':
+            fuse_track_classes = {
+                'Mainline': 'main',
+                'Branch': 'branch',
+                'Industrial': 'industrial',
+            }
+            raw_segment.update({
+                'startNodeId': start_id,
+                'endNodeId': end_id,
+                'trackClass': fuse_track_classes.get(
+                    track_class, str(track_class).lower()
+                ),
+                'style': style_norm.lower(),
+                'speedLimit': speed_limit,
+                'priority': priority,
+                'groupId': group_id,
+                'gauge': gauge,
+            })
+            for legacy_key in (
+                    'startId', 'endId', 'StartId', 'EndId', 'Style'):
+                raw_segment.pop(legacy_key, None)
+        else:
+            raw_segment.update({
+                'startId':    start_id,
+                'endId':      end_id,
+                'trackClass': TRACK_CLASS_JSON.get(track_class, track_class),
+                'Style':      style_norm,
+                'speedLimit': speed_limit,
+                'priority':   priority,
+                'groupId':    group_id,
+                'gauge':      gauge,
+            })
+        raw_segment.pop('Gauge', None)
+        self._raw['tracks']['segments'][sid] = raw_segment
+        self._remove_fuse_track_removal('segments', sid)
         self.dirty = True
 
     def delete_segment(self, sid: str):
@@ -343,8 +497,34 @@ class Layer:
         self.segments[sid] = {'id': sid, 'deleted': True, 'startId': '', 'endId': ''}
         if 'tracks' not in self._raw: self._raw['tracks'] = {}
         if 'segments' not in self._raw['tracks']: self._raw['tracks']['segments'] = {}
-        self._raw['tracks']['segments'][sid] = None
+        if self.track_schema == 'fuse':
+            self._raw['tracks']['segments'].pop(sid, None)
+            if sid in self._created_track_segment_ids:
+                self._created_track_segment_ids.discard(sid)
+            elif sid not in self._original_track_segment_ids:
+                self._add_fuse_track_removal('segments', sid)
+        else:
+            self._raw['tracks']['segments'][sid] = None
         self.dirty = True
+
+    def _add_fuse_track_removal(self, kind: str, object_id: str):
+        if self.track_schema != 'fuse' or not object_id:
+            return
+        tracks = self._raw.setdefault('tracks', {})
+        removals = tracks.setdefault('removals', {})
+        values = removals.setdefault(kind, [])
+        if object_id not in values:
+            values.append(object_id)
+
+    def _remove_fuse_track_removal(self, kind: str, object_id: str):
+        if self.track_schema != 'fuse' or not object_id:
+            return
+        removals = (self._raw.get('tracks') or {}).get('removals') or {}
+        values = removals.get(kind)
+        if isinstance(values, list):
+            removals[kind] = [
+                value for value in values if value != object_id
+            ]
 
     def _normalize_raw(self):
         """Ensure _raw has correct JSON field names before writing.
@@ -360,6 +540,12 @@ class Layer:
         segs = (self._raw.get('tracks') or {}).get('segments') or {}
         for seg in segs.values():
             if not isinstance(seg, dict):
+                continue
+            if self.track_schema == 'fuse':
+                if 'groupId' not in seg or seg['groupId'] is None:
+                    seg['groupId'] = ''
+                if 'gauge' in seg:
+                    seg['gauge'] = normalize_track_gauge(seg['gauge'])
                 continue
             # PascalCase -> camelCase field renames (A20)
             for pascal, camel in (('StartId', 'startId'), ('EndId', 'endId'),
@@ -427,4 +613,3 @@ class Layer:
                 pending.discard(str(self.path))
         print(f"[layer] saved {self.path.name}")
         return True
-

@@ -363,9 +363,22 @@ class ModProject:
                 if fname:
                     ordered_files.append((fname, target, entry_conflicts))
 
+        # Native FUSE packages list schema fragments directly in Info.json.
+        # Load them in manifest order; track-bearing fragments are promoted to
+        # editable graph layers below.
+        fuse_data_files = proj.definition.get('FuseDataFiles', [])
+        if isinstance(fuse_data_files, str):
+            fuse_data_files = [fuse_data_files]
+        for fname in fuse_data_files:
+            if isinstance(fname, str) and fname.strip():
+                ordered_files.append((fname.strip(), 'fuse-data', None))
+
         # Collect all .json files in folder, excluding backups and Definition
         all_jsons = set(p.name for p in folder.glob('*.json')
-                        if p.name not in ('Definition.json', 'definition.json')
+                        if p.name not in (
+                            'Definition.json', 'definition.json',
+                            'Info.json', 'info.json',
+                        )
                         and not p.name.endswith('.json.bak'))
         referenced = set(f for f, _, _c in ordered_files)
 
@@ -413,6 +426,16 @@ class ModProject:
 
             layer = Layer(fpath, ltype, color, label)
             layer.load()
+            if (
+                fpath.name.lower().endswith('.fuse.json')
+                and isinstance(layer._raw.get('tracks'), dict)
+                and (
+                    (layer._raw['tracks'].get('nodes') or {})
+                    or (layer._raw['tracks'].get('segments') or {})
+                )
+            ):
+                layer.layer_type = LAYER_GRAPH
+                layer.color = LAYER_COLORS[LAYER_GRAPH]
             proj._tag_layer_source(layer, source_idx)
             proj.layers.append(layer)
 
@@ -450,7 +473,7 @@ class ModProject:
     def new_mod(cls, folder: Path, mod_id: str, mod_name: str,
                 version: str = '0.0.1',
                 author: str = 'Author',
-                loader: str = 'umm',
+                loader: str = 'railloader',
                 assemblies: list = None,
                 conflicts_with: list = None,
                 load_before: list = None,
@@ -461,9 +484,9 @@ class ModProject:
 
         mod_id    -- must match ^[A-Za-z0-9_.]+$ (hyphens are invalid in both
                      Railloader and UMM mod IDs)
-        loader    -- 'umm' (default) or 'railloader'.
-                     'umm'         -- writes Info.json (UMM format)
-                     'railloader'  -- writes Definition.json (legacy Railloader format)
+        loader    -- 'railloader' (default) or 'umm'.
+                     'railloader'  -- writes Definition.json for map mods
+                     'umm'         -- writes Info.json (C# utility mods only)
         author    -- mod author name (UMM only)
         requirements -- list of required mod IDs (UMM: Requirements field)
 

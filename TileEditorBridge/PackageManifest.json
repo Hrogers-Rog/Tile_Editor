@@ -1,0 +1,14 @@
+{
+  "packageId": "Hrogers.TileEditorBridge",
+  "displayName": "Hrogers Tile Editor Suite",
+  "version": "0.16.4",
+  "bridgeProtocolVersion": 1,
+  "game": "Railroader",
+  "loader": "Unity Mod Manager",
+  "desktopEditor": {
+    "entryPoint": "TileEditor/edit_tiles",
+    "launcher": "Launch Tile Editor.bat",
+    "outputFormat": "RailLoader game-graph.json or native FUSE data fragments",
+    "contentManifest": "RailLoader Definition.json manifestVersion 8 or FUSE Info.json FuseDataFiles"
+  }
+}

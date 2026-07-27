@@ -808,6 +808,63 @@ def next_marker_id(existing_ids: set = None) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Turnout geometry
+# ---------------------------------------------------------------------------
+def turnout_radius_for_chord(chord_length: float, deflection_deg: float):
+    """Return the exact circular radius for a chord and tangent deflection.
+
+    A circular arc's chord points halfway between its entry and exit tangents.
+    Straight legs have no finite radius and return ``None``.
+    """
+    chord = abs(float(chord_length))
+    angle = abs(float(deflection_deg))
+    if chord <= 0.0 or angle <= 1e-9:
+        return None
+    sine = _math.sin(_math.radians(angle) * 0.5)
+    if abs(sine) <= 1e-12:
+        return None
+    return chord / (2.0 * sine)
+
+
+def turnout_leg_pose(
+        sw_x: float,
+        sw_y: float,
+        sw_z: float,
+        approach_rotY: float,
+        deflection_deg: float,
+        leg_length: float,
+        grade_pct: float = 0.0,
+        reverse: bool = False,
+) -> tuple:
+    """Solve one turnout endpoint using circular-chord geometry.
+
+    ``deflection_deg`` is signed from the approach tangent.  For an outgoing
+    leg, the chord bearing lies halfway between the entry and exit tangents.
+    ``reverse`` creates the entry leg behind the switch.  Grade is expressed
+    in the approach direction, so a positive grade raises outgoing endpoints
+    and lowers the entry endpoint.
+
+    Returns ``(x, y, z, rotX, rotY)``.
+    """
+    length = max(0.0, float(leg_length))
+    grade_ratio = float(grade_pct) / 100.0
+    if reverse:
+        chord_heading = float(approach_rotY) + 180.0
+        end_rot_y = chord_heading % 360.0
+        local_grade = -grade_ratio
+    else:
+        chord_heading = float(approach_rotY) + float(deflection_deg) * 0.5
+        end_rot_y = (float(approach_rotY) + float(deflection_deg)) % 360.0
+        local_grade = grade_ratio
+
+    radians = _math.radians(chord_heading)
+    end_x = float(sw_x) + length * _math.sin(radians)
+    end_z = float(sw_z) + length * _math.cos(radians)
+    end_y = float(sw_y) + length * local_grade
+    end_rot_x = -_math.degrees(_math.atan(local_grade))
+    return end_x, end_y, end_z, end_rot_x, end_rot_y
+
+
 # generate_turnout (A12)
 # ---------------------------------------------------------------------------
 def generate_turnout(
@@ -823,6 +880,7 @@ def generate_turnout(
         speed_limit: int = 0,
         diverge_speed: int = 0,
         through_curve_angle: float = 0.0,
+        grade_pct: float = 0.0,
         id_prefix: str = 'N',
         seg_prefix: str = 'S',
         existing_ids: set = None,
@@ -840,8 +898,6 @@ def generate_turnout(
 
     Returns (nodes, segments, sw_id, entry_id, through_id, diverge_id)
     """
-    import math as _m
-
     if existing_ids is None:
         existing_ids = set()
 
@@ -854,18 +910,22 @@ def generate_turnout(
             sid = f"{seg_prefix}_{_rand_chars()}"
             if sid not in existing_ids: existing_ids.add(sid); return sid
 
-    def fwd(rotY, dist):
-        r = _m.radians(rotY)
-        return sw_x + dist*_m.sin(r), sw_z + dist*_m.cos(r)
-
     sign       = 1.0 if direction == 'right' else -1.0
-    div_rotY   = (approach_rotY + sign * diverge_angle) % 360
-    thru_rotY  = (approach_rotY + sign * through_curve_angle) % 360
-    entry_rotY = (approach_rotY + 180) % 360
-
-    ex, ez  = fwd(entry_rotY,  leg_length)
-    tx, tz  = fwd(thru_rotY,   leg_length)
-    dx, dz  = fwd(div_rotY,    leg_length)
+    div_deflection = sign * float(diverge_angle)
+    thru_deflection = sign * float(through_curve_angle)
+    ex, ey, ez, erx, entry_rotY = turnout_leg_pose(
+        sw_x, sw_y, sw_z, approach_rotY, 0.0, leg_length,
+        grade_pct=grade_pct, reverse=True,
+    )
+    tx, ty, tz, trx, thru_rotY = turnout_leg_pose(
+        sw_x, sw_y, sw_z, approach_rotY, thru_deflection, leg_length,
+        grade_pct=grade_pct,
+    )
+    dx, dy, dz, drx, div_rotY = turnout_leg_pose(
+        sw_x, sw_y, sw_z, approach_rotY, div_deflection, leg_length,
+        grade_pct=grade_pct,
+    )
+    sw_rot_x = -_math.degrees(_math.atan(float(grade_pct) / 100.0))
 
     sw_id   = next_nid()
     ent_id  = next_nid()
@@ -874,14 +934,14 @@ def generate_turnout(
 
     nodes = [
         {'id': sw_id,   'x': sw_x,  'y': sw_y,  'z': sw_z,
-         'rotX': 0, 'rotY': approach_rotY, 'rotZ': 0,
+         'rotX': sw_rot_x, 'rotY': approach_rotY, 'rotZ': 0,
          'flipSwitchStand': flip_switch_stand},
-        {'id': ent_id,  'x': ex,    'y': sw_y,  'z': ez,
-         'rotX': 0, 'rotY': entry_rotY,    'rotZ': 0, 'flipSwitchStand': False},
-        {'id': thru_id, 'x': tx,    'y': sw_y,  'z': tz,
-         'rotX': 0, 'rotY': thru_rotY,     'rotZ': 0, 'flipSwitchStand': False},
-        {'id': div_id,  'x': dx,    'y': sw_y,  'z': dz,
-         'rotX': 0, 'rotY': div_rotY,      'rotZ': 0, 'flipSwitchStand': False},
+        {'id': ent_id,  'x': ex,    'y': ey,  'z': ez,
+         'rotX': erx, 'rotY': entry_rotY, 'rotZ': 0, 'flipSwitchStand': False},
+        {'id': thru_id, 'x': tx,    'y': ty,  'z': tz,
+         'rotX': trx, 'rotY': thru_rotY, 'rotZ': 0, 'flipSwitchStand': False},
+        {'id': div_id,  'x': dx,    'y': dy,  'z': dz,
+         'rotX': drx, 'rotY': div_rotY, 'rotZ': 0, 'flipSwitchStand': False},
     ]
 
     _style_norm = (style or 'Standard').capitalize()
@@ -914,6 +974,7 @@ def generate_wye(
         track_class: str = 'Mainline',
         style: str = 'Standard',
         speed_limit: int = 0,
+        grade_pct: float = 0.0,
         id_prefix: str = 'N',
         seg_prefix: str = 'S',
         existing_ids: set = None,
@@ -923,12 +984,11 @@ def generate_wye(
 
     One entry, two diverging legs — no through route.
     left_angle and right_angle are measured from approach_rotY.
-    Frog rotY bisects the two exit angles for clean bezier curves.
+    Frog rotY follows the common entry tangent. Endpoint positions use the
+    circular chord bearing halfway between entry and exit tangents.
 
     Returns (nodes, segments, sw_id, entry_id, left_id, right_id)
     """
-    import math as _m
-
     if existing_ids is None:
         existing_ids = set()
 
@@ -941,19 +1001,21 @@ def generate_wye(
             sid = f"{seg_prefix}_{_rand_chars()}"
             if sid not in existing_ids: existing_ids.add(sid); return sid
 
-    def fwd(rotY, dist):
-        r = _m.radians(rotY)
-        return sw_x + dist * _m.sin(r), sw_z + dist * _m.cos(r)
-
-    left_rotY  = (approach_rotY - left_angle) % 360
-    right_rotY = (approach_rotY + right_angle) % 360
-    entry_rotY = (approach_rotY + 180) % 360
-    # Frog faces the bisector of the two exit legs for clean bezier tangents
-    bisect_rotY = (approach_rotY + (-left_angle + right_angle) / 2.0) % 360
-
-    ex, ez = fwd(entry_rotY,  leg_length)
-    lx, lz = fwd(left_rotY,   leg_length)
-    rx, rz = fwd(right_rotY,  leg_length)
+    ex, ey, ez, erx, entry_rotY = turnout_leg_pose(
+        sw_x, sw_y, sw_z, approach_rotY, 0.0, leg_length,
+        grade_pct=grade_pct, reverse=True,
+    )
+    lx, ly, lz, lrx, left_rotY = turnout_leg_pose(
+        sw_x, sw_y, sw_z, approach_rotY, -abs(left_angle), leg_length,
+        grade_pct=grade_pct,
+    )
+    rx, ry, rz, rrx, right_rotY = turnout_leg_pose(
+        sw_x, sw_y, sw_z, approach_rotY, abs(right_angle), leg_length,
+        grade_pct=grade_pct,
+    )
+    switch_rot_x = -_math.degrees(
+        _math.atan(float(grade_pct) / 100.0)
+    )
 
     sw_id   = next_nid()
     ent_id  = next_nid()
@@ -966,14 +1028,14 @@ def generate_wye(
 
     nodes = [
         {'id': sw_id,   'x': sw_x, 'y': sw_y, 'z': sw_z,
-         'rotX': 0, 'rotY': bisect_rotY, 'rotZ': 0,
+         'rotX': switch_rot_x, 'rotY': approach_rotY, 'rotZ': 0,
          'flipSwitchStand': flip_switch_stand},
-        {'id': ent_id,  'x': ex,   'y': sw_y, 'z': ez,
-         'rotX': 0, 'rotY': entry_rotY,  'rotZ': 0, 'flipSwitchStand': False},
-        {'id': left_id, 'x': lx,   'y': sw_y, 'z': lz,
-         'rotX': 0, 'rotY': left_rotY,   'rotZ': 0, 'flipSwitchStand': False},
-        {'id': rgt_id,  'x': rx,   'y': sw_y, 'z': rz,
-         'rotX': 0, 'rotY': right_rotY,  'rotZ': 0, 'flipSwitchStand': False},
+        {'id': ent_id,  'x': ex,   'y': ey, 'z': ez,
+         'rotX': erx, 'rotY': entry_rotY, 'rotZ': 0, 'flipSwitchStand': False},
+        {'id': left_id, 'x': lx,   'y': ly, 'z': lz,
+         'rotX': lrx, 'rotY': left_rotY, 'rotZ': 0, 'flipSwitchStand': False},
+        {'id': rgt_id,  'x': rx,   'y': ry, 'z': rz,
+         'rotX': rrx, 'rotY': right_rotY, 'rotZ': 0, 'flipSwitchStand': False},
     ]
 
     segments = [
@@ -989,4 +1051,3 @@ def generate_wye(
     ]
 
     return nodes, segments, sw_id, ent_id, left_id, rgt_id
-

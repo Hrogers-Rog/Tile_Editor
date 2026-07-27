@@ -54,13 +54,18 @@ def _gen_add_meters(lat, lon, north, east):
     lon_out = _gen_f32(lon + _gen_f32(east / denom))
     return lat_out, lon_out
 
-def _gen_tile_bounds(gx, gy):
-    mn = _gen_add_meters(GEN_ORIGIN_LAT, GEN_ORIGIN_LON,
-         GEN_TILE_DIM_M * gy + GEN_ORIGIN_N_BIAS,
-         GEN_TILE_DIM_M * gx + GEN_ORIGIN_E_BIAS)
-    mx = _gen_add_meters(GEN_ORIGIN_LAT, GEN_ORIGIN_LON,
-         GEN_TILE_DIM_M * (gy+1) + GEN_ORIGIN_N_BIAS,
-         GEN_TILE_DIM_M * (gx+1) + GEN_ORIGIN_E_BIAS)
+def _gen_tile_bounds(gx, gy, origin_lat=GEN_ORIGIN_LAT,
+                     origin_lon=GEN_ORIGIN_LON,
+                     tile_dimension_m=GEN_TILE_DIM_M,
+                     origin_e_bias=GEN_ORIGIN_E_BIAS,
+                     origin_n_bias=GEN_ORIGIN_N_BIAS):
+    """Return a game tile's lat/lon bounds for the supplied map georeference."""
+    mn = _gen_add_meters(origin_lat, origin_lon,
+         tile_dimension_m * gy + origin_n_bias,
+         tile_dimension_m * gx + origin_e_bias)
+    mx = _gen_add_meters(origin_lat, origin_lon,
+         tile_dimension_m * (gy+1) + origin_n_bias,
+         tile_dimension_m * (gx+1) + origin_e_bias)
     return mn, mx
 
 def _gen_lon_to_wpx(lon, zoom):

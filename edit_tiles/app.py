@@ -23,6 +23,7 @@ import collections
 import traceback
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -33,6 +34,7 @@ import pygame.freetype
 from .pygame_dialogs import (ask_directory, ask_open_filename,
                              ask_save_filename, ask_string, ask_text, ask_choice_list,
                              ask_integer, ask_yes_no)
+from .version import __version__
 
 try:
     from railroader_bridge import RailroaderBridge, preferred_railroader_path
@@ -45,6 +47,7 @@ try:
     from mod_project import (ModProject, LAYER_BASE, LAYER_GRAPH, LAYER_TOWN,
                               LAYER_RIVERS, LAYER_MIGRATION, LAYER_OTHER,
                               ProgressionProject, Layer, _save_json,
+                              normalize_track_gauge,
                               _bezier_control_points, _bezier_for_nodes,
                               generate_curve, generate_parallel_tracks,
                               node_flatten, node_reverse, node_set_rotY,
@@ -52,12 +55,16 @@ try:
                               span_set, span_delete, merge_nodes, split_node,
                               smooth_grade,
                               apply_grade_from_start,
+                              build_vertical_alignment,
+                              dense_vertical_alignment_stations,
                               straighten_chain_xz,
                               spliney_set_point, spliney_add_road, spliney_delete,
                               next_spliney_id, spliney_insert_point,
                               spliney_delete_point, scenery_set, scenery_delete,
-                              create_trestle_from_segment, next_scenery_id,
-                              generate_turnout,
+                              create_trestle_from_segment,
+                              fit_trestle_to_segment, next_scenery_id,
+                              generate_turnout, turnout_leg_pose,
+                              turnout_radius_for_chord,
                               generate_wye,
                               move_group,
                               mandela_set, mandela_delete, next_mandela_id)
@@ -105,7 +112,7 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
         window_w = min(window_w, display_w)
         window_h = min(window_h, display_h)
         self.screen = pygame.display.set_mode((window_w, window_h), pygame.RESIZABLE)
-        pygame.display.set_caption("Terrain Tile Editor")
+        pygame.display.set_caption(f"Railroader Tile Editor v{__version__}")
         self.folders = folders if isinstance(folders, list) else ([folders] if folders else [])
         self.track_graph_path: Path | None = None
         self._mod_source_kind: str | None = None
@@ -190,6 +197,12 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
         self.diff_mode    = False
         # OSM overlay
         self.osm          = OsmOverlay()
+        self.map_origin_lat = GEN_ORIGIN_LAT
+        self.map_origin_lon = GEN_ORIGIN_LON
+        self.map_tile_dimension_m = GEN_TILE_DIM_M
+        self.map_origin_e_bias = GEN_ORIGIN_E_BIAS
+        self.map_origin_n_bias = GEN_ORIGIN_N_BIAS
+        self.map_georef_path: Path | None = None
         # Help overlay
         self.show_help    = False
         # --- Live bridge ---
@@ -199,8 +212,14 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
         self._bridge_nodes_raw:    dict = {}
         self._bridge_segments_raw: dict = {}
         self._bridge_pending_state = None
+        self._bridge_pending_editor_commands: list[dict] = []
         self._bridge_lock = threading.Lock()
         self._bridge_last_fingerprint = None  # skip bezier rebuild if unchanged
+        self._last_editor_state_publish = 0.0
+        self._game_graph_sync_locked = False
+        self._game_terrain_sync_locked = False
+        self._game_sync_session_started_at = int(
+            time.time() * 1000)
         if _BRIDGE_AVAILABLE:
             self._init_bridge()
         # --- Mod project ---
@@ -231,6 +250,9 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
         self.geo_track_class = 'Mainline'
         self.geo_style       = 'Standard'
         self.geo_speed       = 45
+        # RailLoader-compatible metadata consumed by FUSE Narrow Gauge.
+        # New track tools and direct node connections inherit this value.
+        self.geo_gauge       = 'Standard'
         # Parallel track params
         self.geo_separation  = 5.0
         self.geo_n_tracks    = 1
@@ -240,6 +262,10 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
         self.geo_preview_meta: dict = {}
         self._geo_input_focus: str | None = None  # which numeric field is active
         self._geo_input_buf: str = ''
+        self._geo_scroll_by_mode: dict[str, int] = {}
+        self._geo_scroll_max_by_mode: dict[str, int] = {}
+        self._geo_scroll_max: int = 0
+        self._geo_scroll_view_rect = None
         self._geo_node_place_mode: bool = False
         self._geo_guide_place_mode: bool = False
         self.alignment_min_radius_m: float = 60.0
@@ -257,6 +283,11 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
         self.grade_fix_first: bool = False
         self.grade_fix_last:  bool = False
         self.grade_target_pct: float = 0.0  # target grade % for Apply Grade %
+        self.grade_start_pct: float = 0.0
+        self.grade_end_pct: float = 0.0
+        self.grade_transition_in_m: float = 100.0
+        self.grade_transition_out_m: float = 100.0
+        self.grade_transition_preview_active: bool = False
         self.place_y_lock: bool = False      # lock placement Y to fixed value
         self.place_y_value: float = 0.0     # the fixed Y to use when lock is on
         self.place_y_inherit: bool = False  # inherit Y from last placed node
@@ -549,12 +580,24 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
 
     def _sync_mod_project_save_mode(self):
         if self.mod_project:
-            self.mod_project.defer_writes = not bool(getattr(self, 'live_mod_apply', True))
+            self.mod_project.defer_writes = (
+                not bool(getattr(self, 'live_mod_apply', True))
+                or bool(
+                    getattr(
+                        self,
+                        '_game_graph_sync_locked',
+                        False))
+            )
 
     def _apply_pending_mod_changes(self, announce: bool = True) -> tuple[int, int]:
         if not self.mod_project:
             if announce:
                 self._set_status("No mod project loaded")
+            return 0, 0
+        if getattr(self, '_game_graph_sync_locked', False):
+            if announce:
+                self._set_status(
+                    "Game has unsaved map edits; desktop save is paused")
             return 0, 0
 
         dirty_layers = [
@@ -621,6 +664,10 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
     def _save_mod_layer_now(self, li: int) -> tuple[object, int]:
         if not self.mod_project or not (0 <= li < len(self.mod_project.layers)):
             return None, 0
+        if getattr(self, '_game_graph_sync_locked', False):
+            self._set_status(
+                "Game has unsaved map edits; desktop save is paused")
+            return None, 0
         layer = self.mod_project.layers[li]
         should_reload = bool(layer.dirty) or str(layer.path) in self._pending_bridge_reload_paths
         saved = self.mod_project.save_layer(li, force=True)
@@ -636,6 +683,86 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
     # Loading
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _find_map_json(folder) -> Path | None:
+        """Find the nearest Map.json for a tile folder or a path inside one."""
+        path = Path(folder).expanduser()
+        start = path.parent if path.is_file() else path
+        search_dirs = [start]
+        search_dirs.extend(list(start.parents)[:4])
+        for directory in search_dirs:
+            for candidate in (directory / 'Map.json',
+                              directory / 'map.json',
+                              directory / 'Map' / 'Map.json'):
+                if candidate.is_file():
+                    return candidate.resolve()
+        return None
+
+    @classmethod
+    def _read_map_georeference(cls, folders):
+        """Read the first valid map georeference associated with tile folders."""
+        selected = None
+        checked = set()
+        for folder in folders:
+            map_json = cls._find_map_json(folder)
+            if map_json is None or map_json in checked:
+                continue
+            checked.add(map_json)
+            try:
+                data = json.loads(map_json.read_text(encoding='utf-8-sig'))
+                origin = data.get('origin')
+                if not isinstance(origin, dict):
+                    raise ValueError("missing origin object")
+                lat = float(origin['latitude'])
+                lon = float(origin['longitude'])
+                tile_dimension = float(data['tileDimension'])
+                east_bias = float(origin.get('eastBiasMeters', GEN_ORIGIN_E_BIAS))
+                north_bias = float(origin.get('northBiasMeters', GEN_ORIGIN_N_BIAS))
+                if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+                    raise ValueError("origin is outside valid latitude/longitude bounds")
+                if not all(math.isfinite(value) for value in
+                           (lat, lon, tile_dimension, east_bias, north_bias)):
+                    raise ValueError("georeference contains a non-finite number")
+                if tile_dimension <= 0.0:
+                    raise ValueError("tileDimension must be greater than zero")
+                georef = (lat, lon, tile_dimension, east_bias, north_bias, map_json)
+            except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as ex:
+                print(f"[map] ignoring invalid georeference in {map_json}: {ex}")
+                continue
+
+            if selected is None:
+                selected = georef
+            elif georef[:5] != selected[:5]:
+                print(f"[map] georeference conflict: using {selected[5]}, ignoring {map_json}")
+        return selected
+
+    def _configure_map_georeference(self, folders, preserve_if_missing=False):
+        """Update OSM tile bounds from Map.json, with legacy NC defaults as fallback."""
+        georef = self._read_map_georeference(folders)
+        if georef is None:
+            if preserve_if_missing:
+                return False
+            georef = (GEN_ORIGIN_LAT, GEN_ORIGIN_LON, GEN_TILE_DIM_M,
+                      GEN_ORIGIN_E_BIAS, GEN_ORIGIN_N_BIAS, None)
+
+        lat, lon, tile_dimension, east_bias, north_bias, map_json = georef
+        previous = (self.map_origin_lat, self.map_origin_lon,
+                    self.map_tile_dimension_m, self.map_origin_e_bias,
+                    self.map_origin_n_bias, self.map_georef_path)
+        current = (lat, lon, tile_dimension, east_bias, north_bias, map_json)
+        self.map_origin_lat = lat
+        self.map_origin_lon = lon
+        self.map_tile_dimension_m = tile_dimension
+        self.map_origin_e_bias = east_bias
+        self.map_origin_n_bias = north_bias
+        self.map_georef_path = map_json
+        if current != previous:
+            self.osm.invalidate()
+        source = str(map_json) if map_json else 'legacy North Carolina defaults'
+        print(f"[map] OSM georeference {lat:.6f}, {lon:.6f}; "
+              f"tile {tile_dimension:g} m ({source})")
+        return current != previous
+
 
     def load_folders(self, folders, preserve_view=False):
         if isinstance(folders, str):
@@ -649,6 +776,7 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
             self._set_status("No .data tiles found in selected folders")
             print("No .data tiles found in selected folders")
             return
+        self._configure_map_georeference(folders)
         self.loading = True
         self.load_progress = (0, len(all_files))
         self.tiles = {}
@@ -726,6 +854,7 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
         if not all_files:
             self._set_status("No new tiles found in selected folder(s)")
             return
+        self._configure_map_georeference(merged_folders, preserve_if_missing=True)
         self.loading = True
         existing = len(self.tiles)
         self.load_progress = (0, len(all_files))
@@ -1080,6 +1209,7 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
                 'track_class': tc,
                 'style': style,
                 'speed_limit': seg.get('speedLimit', ''),
+                'gauge': normalize_track_gauge(seg.get('gauge', 'Standard')),
                 'start_y': y0,
                 'end_y': y1,
                 'run_m': dist,
@@ -1165,6 +1295,9 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
                     'speedLimit': seg.get('speedLimit', ''),
                     'priority': seg.get('priority', ''),
                     'groupId': seg.get('groupId', ''),
+                    'gauge': normalize_track_gauge(
+                        seg.get('gauge', 'Standard')
+                    ),
                     'source': 'mod',
                 }
         seg_obj = self._bridge_segments_raw.get(seg_id)
@@ -1178,6 +1311,9 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
                 'speedLimit': seg_obj.speedLimit,
                 'priority': seg_obj.priority,
                 'groupId': getattr(seg_obj, 'groupId', ''),
+                'gauge': normalize_track_gauge(
+                    getattr(seg_obj, 'gauge', 'Standard')
+                ),
                 'source': 'bridge',
             }
         for meta in self.track_segment_meta:
@@ -1191,6 +1327,9 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
                     'speedLimit': meta.get('speed_limit', ''),
                     'priority': '',
                     'groupId': '',
+                    'gauge': normalize_track_gauge(
+                        meta.get('gauge', 'Standard')
+                    ),
                     'source': 'loaded',
                 }
         return None
@@ -1209,6 +1348,8 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
             'turnout_diverge_angle': (1.0, 90.0),
             'geo_spline_width': (0.0, 1000.0),
             'geo_piece_length': (1.0, 5000.0),
+            'grade_transition_in_m': (0.0, 10000.0),
+            'grade_transition_out_m': (0.0, 10000.0),
         }
         int_keys = {
             'geo_speed': (1, 200),
@@ -1231,6 +1372,9 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
         self._geo_input_buf = ''
         if not (self.geo_mode == 'pieces' and key in ('geo_piece_length', 'geo_radius', 'geo_degrees', 'geo_n_segs', 'geo_speed')):
             self._clear_geo_preview()
+        if key.startswith('grade_'):
+            self._profile_cache_key = None
+            self._profile_cache_data = None
         return True
 
     def _segments_for_track_node(self, node_id: str | None):
@@ -1429,6 +1573,7 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
             self._set_status("Grade chain: select a track node first")
             return False
         self.grade_chain = [str(node_id)]
+        self._set_grade_transition_preview(False)
         self._clear_geo_preview()
         self._set_status(f"Grade chain started at {node_id}")
         return True
@@ -1459,6 +1604,7 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
             )
             return False
         self.grade_chain.extend(extension)
+        self._set_grade_transition_preview(False)
         self._clear_geo_preview()
         distance_m = float(path.get('distance', 0.0) or 0.0)
         intermediate_count = max(0, len(extension) - 1)
@@ -1496,6 +1642,12 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
             source_sig,
             round(float(self.profile_grade_warn_pct), 3),
             round(float(self.profile_break_warn_pct), 3),
+            bool(getattr(self, 'grade_transition_preview_active', False)),
+            round(float(getattr(self, 'grade_start_pct', 0.0)), 4),
+            round(float(getattr(self, 'grade_target_pct', 0.0)), 4),
+            round(float(getattr(self, 'grade_end_pct', 0.0)), 4),
+            round(float(getattr(self, 'grade_transition_in_m', 0.0)), 3),
+            round(float(getattr(self, 'grade_transition_out_m', 0.0)), 3),
             bench_sig,
             id(self.tiles),
             len(self.tiles),
@@ -1745,6 +1897,12 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
             track_class = str(piece.get('trackClass', self.geo_track_class))
             style = str(piece.get('style', self.geo_style))
             speed_limit = int(piece.get('speedLimit', self.geo_speed))
+            gauge = normalize_track_gauge(
+                piece.get(
+                    'gauge',
+                    getattr(self, 'geo_gauge', 'Standard'),
+                )
+            )
             if kind == 'straight':
                 length_m = max(0.1, float(piece.get('length_m', 0.0)))
                 heading = math.radians(float(current.get('rotY', 0.0)))
@@ -1772,6 +1930,7 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
                     'speedLimit': speed_limit,
                     'priority': 0,
                     'groupId': '',
+                    'gauge': gauge,
                 })
                 prev_current = copy.deepcopy(current)
                 current = copy.deepcopy(next_node)
@@ -1806,6 +1965,8 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
                 arc_nodes = copy.deepcopy(nodes[1:])
                 arc_segs = copy.deepcopy(segs)
                 arc_segs[0]['startId'] = str(current.get('id'))
+                for arc_segment in arc_segs:
+                    arc_segment['gauge'] = gauge
                 preview_nodes.extend(arc_nodes)
                 preview_segs.extend(arc_segs)
                 prev_current = copy.deepcopy(current)
@@ -1877,6 +2038,7 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
                     existing_ids.add(n['id'])
                 for s in t_segs:
                     existing_ids.add(s['id'])
+                    s['gauge'] = gauge
                 # Add sw, through, diverge — not the redundant entry node
                 preview_nodes.append(copy.deepcopy(t_nodes[0]))  # sw / frog
                 preview_nodes.append(copy.deepcopy(t_nodes[2]))  # through
@@ -1918,6 +2080,7 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
                 'trackClass': self.geo_track_class,
                 'style': self.geo_style,
                 'speedLimit': int(self.geo_speed),
+                'gauge': getattr(self, 'geo_gauge', 'Standard'),
             }
             summary = f"Straight {length_m:.1f} m"
         elif piece_type == 'Arc':
@@ -1932,6 +2095,7 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
                 'trackClass': self.geo_track_class,
                 'style': self.geo_style,
                 'speedLimit': int(self.geo_speed),
+                'gauge': getattr(self, 'geo_gauge', 'Standard'),
             }
             summary = f"Arc R {radius_m:.1f} m  {degrees:.1f}° {self.geo_direction}"
         elif piece_type == 'Turnout':
@@ -1947,6 +2111,9 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
                 'style':         self.geo_style,
                 'speedLimit':    int(self.geo_speed),
                 'divSpeedLimit': int(self.turnout_div_speed),
+                'gauge':         getattr(
+                    self, 'geo_gauge', 'Standard'
+                ),
             }
             summary = (
                 f"Turnout  leg {self.turnout_leg_length:.1f} m  "
@@ -2052,6 +2219,10 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
         diverge_angle_deg,
         diverge_radius,
         diverge_point,
+        through_angle_deg,
+        through_radius,
+        through_point,
+        approach_grade_pct,
     ):
         errors = []
         warnings = []
@@ -2094,6 +2265,20 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
                 'radius': float(diverge_radius),
             })
 
+        through_angle = abs(float(through_angle_deg))
+        if through_angle > 1e-6:
+            if through_radius is None:
+                errors.append("Could not solve a stable through-route radius")
+            elif through_radius < float(self.alignment_min_radius_m):
+                errors.append(
+                    f"Sharp through route: radius {through_radius:.1f} m is under "
+                    f"{self.alignment_min_radius_m:.0f} m"
+                )
+                radius_warnings.append({
+                    'point': through_point,
+                    'radius': float(through_radius),
+                })
+
         if not conn_segs:
             warnings.append("Standalone switch preview: entry and through legs will both be created")
         elif not entry_segs or not forward_segs:
@@ -2105,6 +2290,8 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
         return {
             'mode': 'turnout',
             'diverge_radius_m': diverge_radius,
+            'through_radius_m': through_radius,
+            'approach_grade_pct': float(approach_grade_pct),
             'radius_warnings': radius_warnings,
             'warnings': warnings,
             'errors': errors,
@@ -2378,6 +2565,84 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
 
         return None
 
+    def _calculate_grade_transition_preview(self, source: dict, node_marks: list) -> dict:
+        """Build node and plot samples for the active grade-chain settings."""
+        if not source or source.get('kind') != 'grade_chain':
+            return {
+                'points': [],
+                'dense_points': [],
+                'errors': ["smooth transitions require a Grade chain"],
+                'warnings': [],
+            }
+        if len(node_marks) < 2:
+            return {
+                'points': [],
+                'dense_points': [],
+                'errors': ["smooth transitions need at least two chain nodes"],
+                'warnings': [],
+            }
+
+        stations = [float(mark.get('station_m', 0.0)) for mark in node_marks]
+        start_y = float(node_marks[0].get('track_y', 0.0))
+        node_result = build_vertical_alignment(
+            stations,
+            start_y,
+            self.grade_start_pct,
+            self.grade_target_pct,
+            self.grade_end_pct,
+            self.grade_transition_in_m,
+            self.grade_transition_out_m,
+        )
+        result = dict(node_result)
+        result['dense_points'] = []
+        result['node_points'] = []
+        if node_result.get('errors'):
+            return result
+
+        total_length = float(node_result.get('total_length_m', 0.0))
+        dense_stations = dense_vertical_alignment_stations(
+            total_length,
+            self.grade_transition_in_m,
+            self.grade_transition_out_m,
+        )
+        dense_result = build_vertical_alignment(
+            dense_stations,
+            start_y,
+            self.grade_start_pct,
+            self.grade_target_pct,
+            self.grade_end_pct,
+            self.grade_transition_in_m,
+            self.grade_transition_out_m,
+        )
+        result['dense_points'] = list(dense_result.get('points', []))
+        result['node_points'] = [
+            dict(point, node_id=str(mark.get('id', '')))
+            for point, mark in zip(
+                node_result.get('points', []),
+                node_marks,
+            )
+        ]
+
+        warnings = list(result.get('warnings', []))
+        boundary_specs = [
+            ("entry transition end", float(self.grade_transition_in_m)),
+            (
+                "exit transition start",
+                total_length - float(self.grade_transition_out_m),
+            ),
+        ]
+        for label, boundary in boundary_specs:
+            if boundary <= 0.001 or boundary >= total_length - 0.001:
+                continue
+            nearest = min(abs(station - boundary) for station in stations)
+            if nearest > 10.0:
+                warnings.append(
+                    f"no node within {nearest:.1f} m of the {label}; "
+                    "add a node there for a more exact curve"
+                )
+        result['warnings'] = warnings
+        return result
+
     def _build_profile_data(self):
         preview_node_id = getattr(self, 'profile_drag_node_id', None)
         preview_y = getattr(self, 'profile_drag_preview_y', None)
@@ -2411,7 +2676,7 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
             if not self.tiles:
                 return fallback_y
             sampled = float(self._sample_terrain_y(x_val, z_val))
-            if sampled == 0.0 and not any(self.tiles.values()):
+            if sampled == 0.0 and not any(list(self.tiles.values())):
                 return fallback_y
             return sampled
 
@@ -2529,12 +2794,36 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
                 'track_y': float(entry.get('y', mark.get('track_y', 0.0))),
             })
 
+        vertical_preview = None
+        if getattr(self, 'grade_transition_preview_active', False):
+            vertical_preview = self._calculate_grade_transition_preview(
+                source,
+                node_marks,
+            )
+            for message in vertical_preview.get('errors', []):
+                warnings.append({
+                    'kind': 'vertical_curve',
+                    'station_m': 0.0,
+                    'text': message,
+                    'severity': 'error',
+                })
+            for message in vertical_preview.get('warnings', []):
+                warnings.append({
+                    'kind': 'vertical_curve',
+                    'station_m': 0.0,
+                    'text': message,
+                    'severity': 'warn',
+                })
+
         y_values = []
         for sample in samples:
             y_values.append(float(sample.get('track_y', 0.0)))
             y_values.append(float(sample.get('terrain_y', 0.0)))
         for bench in bench_nodes:
             y_values.append(float(bench.get('track_y', 0.0)))
+        if vertical_preview:
+            for point in vertical_preview.get('dense_points', []):
+                y_values.append(float(point.get('y', 0.0)))
         if not y_values:
             y_values = [0.0, 1.0]
         y_min = min(y_values)
@@ -2559,6 +2848,7 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
             'max_cut_fill_m': max_cut_fill,
             'y_min': y_min,
             'y_max': y_max,
+            'vertical_preview': vertical_preview,
         }
         if cache_key is not None:
             self._profile_cache_key = cache_key
@@ -2619,21 +2909,52 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
             self._set_status(f"Profile edit node not found: {node_id}")
             return
         self._push_undo(f"profile y {node_id}")
-        graph_layer.set_node(
-            node_id,
-            float(existing.get('x', 0.0)),
-            float(new_y),
-            float(existing.get('z', 0.0)),
-            float(existing.get('rotX', 0.0)),
-            float(existing.get('rotY', 0.0)),
-            float(existing.get('rotZ', 0.0)),
-            bool(existing.get('flipSwitchStand', False)),
-        )
-        self.mod_project._rebuild_merge()
-        self._mark_measure_cache_dirty()
-        graph_layer.save()
-        if self.bridge:
-            self.bridge.reload_tracks(str(graph_layer.path))
+        source = self._profile_source_chain()
+        source_nodes = list((source or {}).get('nodes', []))
+        source_ids = [str(node.get('id')) for node in source_nodes]
+        if node_id in source_ids and len(source_nodes) >= 2:
+            y_by_id = {
+                str(node.get('id')): float(node.get('y', 0.0))
+                for node in source_nodes
+            }
+            y_by_id[node_id] = float(new_y)
+            grade_by_id = self._grades_for_node_elevations(
+                source_nodes, y_by_id
+            )
+            moved_index = source_ids.index(node_id)
+            affected = range(
+                max(0, moved_index - 1),
+                min(len(source_nodes), moved_index + 2),
+            )
+            for index in affected:
+                node = source_nodes[index]
+                current_id = str(node.get('id'))
+                graph_layer.set_node(
+                    current_id,
+                    float(node.get('x', 0.0)),
+                    float(y_by_id[current_id]),
+                    float(node.get('z', 0.0)),
+                    self._grade_pitch_for_node(
+                        source_nodes,
+                        index,
+                        grade_by_id.get(current_id, 0.0),
+                    ),
+                    float(node.get('rotY', 0.0)),
+                    float(node.get('rotZ', 0.0)),
+                    bool(node.get('flipSwitchStand', False)),
+                )
+        else:
+            graph_layer.set_node(
+                node_id,
+                float(existing.get('x', 0.0)),
+                float(new_y),
+                float(existing.get('z', 0.0)),
+                float(existing.get('rotX', 0.0)),
+                float(existing.get('rotY', 0.0)),
+                float(existing.get('rotZ', 0.0)),
+                bool(existing.get('flipSwitchStand', False)),
+            )
+        self._commit_mod_layer_edit(graph_layer, graph_changed=True)
         self.sel_mod_node_id = node_id
         self.sel_mod_seg_id = None
         self.profile_selected_node_id = node_id
@@ -3459,13 +3780,27 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
                 "Enter mod display name:") or mod_id
             from pathlib import Path
             self._load_mod_project(
-                lambda p: ModProject.new_mod(Path(p), mod_id, mod_name), folder,
+                lambda p: ModProject.new_mod(
+                    Path(p), mod_id, mod_name, loader='railloader'
+                ),
+                folder,
                 source_kind='mod_folder')
         except Exception as ex:
             self._set_status(f"New mod failed: {ex}")
 
     def _reload_discard_items(self):
         items = []
+        # Terrain folders load on a worker thread. Snapshot the dictionary
+        # before inspecting it so a completed tile cannot resize the live
+        # collection while the renderer is drawing the navigation bar.
+        dirty_terrain = sum(
+            1
+            for tile in list(self.tiles.values())
+            if tile.dirty
+        )
+        if dirty_terrain:
+            items.append(
+                f"{dirty_terrain} unsaved terrain tile(s)")
         if self.mod_project and self.mod_project.dirty:
             items.append("unsaved mod layer changes")
         if self.prog_project and self.prog_project.dirty:
@@ -3475,7 +3810,11 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
         return items
 
     def _has_reloadable_source(self) -> bool:
-        return bool(self.track_graph_path or self._mod_source_paths or self._mod_source_path)
+        return bool(
+            self.folders
+            or self.track_graph_path
+            or self._mod_source_paths
+            or self._mod_source_path)
 
     def _has_unsaved_reload_changes(self) -> bool:
         return bool(self._reload_discard_items())
@@ -3499,6 +3838,12 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
         old_prog_panel = self.prog_panel
         old_area_panel = self.area_panel
         reloaded = []
+
+        if self.folders:
+            self.load_folders(
+                list(self.folders),
+                preserve_view=True)
+            reloaded.append("terrain tiles")
 
         if self.track_graph_path:
             try:
@@ -3662,19 +4007,26 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
     # Mod edit undo system
     # ------------------------------------------------------------------
     def _push_undo(self, description: str):
-        """Snapshot the current graph layer for undo."""
+        """Snapshot every editable collection in the current graph layer."""
         if not self.mod_project:
             return
         graph = self.mod_project.get_graph_layer()
         if not graph:
             return
-        import copy, json
+        import copy
         snapshot = {
-            'desc':     description,
-            'nodes':    copy.deepcopy(graph.nodes),
-            'segments': copy.deepcopy(graph.segments),
-            'spans':    copy.deepcopy(graph.spans),
-            'raw':      copy.deepcopy(graph._raw),
+            'desc':         description,
+            'nodes':        copy.deepcopy(graph.nodes),
+            'segments':     copy.deepcopy(graph.segments),
+            'spans':        copy.deepcopy(graph.spans),
+            'splineys':     copy.deepcopy(graph.splineys),
+            'scenery':      copy.deepcopy(graph.scenery),
+            'mandelas':     copy.deepcopy(graph.mandelas),
+            'areas':        copy.deepcopy(graph.areas),
+            'texts':        copy.deepcopy(graph.texts),
+            'simpleGraphs': copy.deepcopy(graph.simpleGraphs),
+            'loads':        copy.deepcopy(graph.loads),
+            'raw':          copy.deepcopy(graph._raw),
         }
         self._mod_undo_stack.append(snapshot)
         if len(self._mod_undo_stack) > self._mod_undo_max:
@@ -3692,17 +4044,49 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
             return
         snap = self._mod_undo_stack.pop()
         import copy
-        graph.nodes    = copy.deepcopy(snap['nodes'])
-        graph.segments = copy.deepcopy(snap['segments'])
-        graph.spans    = copy.deepcopy(snap['spans'])
-        graph._raw     = copy.deepcopy(snap['raw'])
+        graph.nodes        = copy.deepcopy(snap['nodes'])
+        graph.segments     = copy.deepcopy(snap['segments'])
+        graph.spans        = copy.deepcopy(snap['spans'])
+        graph.splineys     = copy.deepcopy(snap.get('splineys', {}))
+        graph.scenery      = copy.deepcopy(snap.get('scenery', {}))
+        graph.mandelas     = copy.deepcopy(snap.get('mandelas', {}))
+        graph.areas        = copy.deepcopy(snap.get('areas', {}))
+        graph.texts        = copy.deepcopy(snap.get('texts', {}))
+        graph.simpleGraphs = copy.deepcopy(snap.get('simpleGraphs', {}))
+        graph.loads        = copy.deepcopy(snap.get('loads', {}))
+        graph._raw         = copy.deepcopy(snap['raw'])
+        graph.dirty = True
 
-        self.mod_project._rebuild_merge()
-        self._mark_measure_cache_dirty()
-        graph.save()
-        if self.bridge:
-            self.bridge.reload_tracks(str(graph.path))
+        self._commit_mod_layer_edit(graph, graph_changed=True)
+        if (
+            self.sel_mod_node_id
+            and self.sel_mod_node_id not in self.mod_project.merged_nodes
+        ):
+            self.sel_mod_node_id = None
+        if (
+            self.sel_mod_seg_id
+            and self.sel_mod_seg_id not in self.mod_project.merged_segments
+        ):
+            self.sel_mod_seg_id = None
+        if (
+            self.sel_scenery_id
+            and self.sel_scenery_id not in self.mod_project.merged_scenery
+        ):
+            self.sel_scenery_id = None
+            self.sel_scenery_layer = None
         self._set_status(f"Undo: {snap['desc']}")
+
+    def _commit_mod_layer_edit(self, layer, graph_changed: bool = False):
+        """Refresh, save, and hot-reload one RailLoader map layer consistently."""
+        if not self.mod_project or layer is None:
+            return False
+        self.mod_project._rebuild_merge()
+        if graph_changed:
+            self._mark_measure_cache_dirty()
+        saved = layer.save()
+        if self.bridge:
+            self.bridge.reload_tracks(str(layer.path))
+        return saved
 
     # ------------------------------------------------------------------
     # Merge / Split
@@ -3725,10 +4109,7 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
         self.sel_mod_node_id = None
         self.sel_mod_seg_id  = new_sid
 
-        self.mod_project._rebuild_merge()
-        self._mark_measure_cache_dirty()
-        graph.save()
-        if self.bridge: self.bridge.reload_tracks(str(graph.path))
+        self._commit_mod_layer_edit(graph, graph_changed=True)
         self._set_status(f"Merged → {new_sid}")
 
     def split_selected_node(self):
@@ -3748,10 +4129,7 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
         new_nid = split_node(graph, self.mod_project.merged_nodes,
                              self.sel_mod_node_id, seg_to_cut)
 
-        self.mod_project._rebuild_merge()
-        self._mark_measure_cache_dirty()
-        graph.save()
-        if self.bridge: self.bridge.reload_tracks(str(graph.path))
+        self._commit_mod_layer_edit(graph, graph_changed=True)
         self._set_status(f"Split → {new_nid}  (drag to separate)")
 
     def _handle_prop_keydown(self, event) -> bool:
@@ -3785,11 +4163,17 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
             return
         nid = self.sel_mod_node_id
         sid = self.sel_mod_seg_id
+        undo_depth = len(self._mod_undo_stack)
         self._push_undo(f"edit {field} on {nid or sid}")
+
+        def discard_undo():
+            if len(self._mod_undo_stack) > undo_depth:
+                self._mod_undo_stack.pop()
 
         if nid:
             node = dict(self.mod_project.merged_nodes.get(nid, {}))
             if not node:
+                discard_undo()
                 return
             try:
                 if   field == 'X':    node['x']    = float(value)
@@ -3802,24 +4186,27 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
                     # Rename node — update all segment references too
                     new_id = value.strip()
                     if new_id and new_id != nid:
+                        if new_id in self.mod_project.merged_nodes:
+                            discard_undo()
+                            self._set_status(f"Node ID already exists: {new_id}")
+                            return
                         self._rename_node(nid, new_id, graph)
                         return
             except ValueError:
+                discard_undo()
                 self._set_status(f"Invalid value: {value}")
                 return
             graph.set_node(nid, node['x'], node['y'], node['z'],
                            node.get('rotX',0), node.get('rotY',0),
                            node.get('rotZ',0), node.get('flipSwitchStand',False))
 
-            self.mod_project._rebuild_merge()
-            self._mark_measure_cache_dirty()
-            graph.save()
-            if self.bridge: self.bridge.reload_tracks(str(graph.path))
+            self._commit_mod_layer_edit(graph, graph_changed=True)
             self._set_status(f"{nid}  {field}={value}")
 
         elif sid:
             seg = dict(self.mod_project.merged_segments.get(sid, {}))
             if not seg:
+                discard_undo()
                 return
             try:
                 if   field == 'Speed':    seg['speedLimit'] = int(float(value))
@@ -3828,9 +4215,14 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
                 elif field == 'ID':
                     new_id = value.strip()
                     if new_id and new_id != sid:
+                        if new_id in self.mod_project.merged_segments:
+                            discard_undo()
+                            self._set_status(f"Segment ID already exists: {new_id}")
+                            return
                         self._rename_segment(sid, new_id, graph)
                         return
             except ValueError:
+                discard_undo()
                 self._set_status(f"Invalid value: {value}")
                 return
             graph.set_segment(sid, seg['startId'], seg['endId'],
@@ -3838,13 +4230,13 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
                               seg.get('style','Standard'),
                               seg.get('speedLimit',45),
                               seg.get('priority',0),
-                              seg.get('groupId',''))
+                              seg.get('groupId',''),
+                              seg.get('gauge','Standard'))
 
-            self.mod_project._rebuild_merge()
-            self._mark_measure_cache_dirty()
-            graph.save()
-            if self.bridge: self.bridge.reload_tracks(str(graph.path))
+            self._commit_mod_layer_edit(graph, graph_changed=True)
             self._set_status(f"{sid}  {field}={value}")
+        else:
+            discard_undo()
 
     def _rename_node(self, old_id: str, new_id: str, graph):
         """Rename a node ID and update all segment references."""
@@ -3866,13 +4258,11 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
                 graph.set_segment(s['id'], s['startId'], s['endId'],
                                   s.get('trackClass','Mainline'), s.get('style','Standard'),
                                   s.get('speedLimit',45), s.get('priority',0),
-                                  s.get('groupId',''))
+                                  s.get('groupId',''),
+                                  s.get('gauge','Standard'))
         self.sel_mod_node_id = new_id
 
-        self.mod_project._rebuild_merge()
-        self._mark_measure_cache_dirty()
-        graph.save()
-        if self.bridge: self.bridge.reload_tracks(str(graph.path))
+        self._commit_mod_layer_edit(graph, graph_changed=True)
         self._set_status(f"Renamed {old_id} → {new_id}")
 
     def _rename_segment(self, old_id: str, new_id: str, graph):
@@ -3883,14 +4273,12 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
         graph.set_segment(new_id, seg['startId'], seg['endId'],
                           seg.get('trackClass','Mainline'), seg.get('style','Standard'),
                           seg.get('speedLimit',45), seg.get('priority',0),
-                          seg.get('groupId',''))
+                          seg.get('groupId',''),
+                          seg.get('gauge','Standard'))
         graph.delete_segment(old_id)
         self.sel_mod_seg_id = new_id
 
-        self.mod_project._rebuild_merge()
-        self._mark_measure_cache_dirty()
-        graph.save()
-        if self.bridge: self.bridge.reload_tracks(str(graph.path))
+        self._commit_mod_layer_edit(graph, graph_changed=True)
         self._set_status(f"Renamed segment {old_id} → {new_id}")
 
     def _do_prop_action(self, action: str):
@@ -3937,10 +4325,7 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
                                node.get('rotX',0), node.get('rotY',0),
                                node.get('rotZ',0), flip)
 
-                self.mod_project._rebuild_merge()
-                self._mark_measure_cache_dirty()
-                graph.save()
-                if self.bridge: self.bridge.reload_tracks(str(graph.path))
+                self._commit_mod_layer_edit(graph, graph_changed=True)
                 self._set_status(f"{nid}  flipSwitchStand={flip}")
             return
 
@@ -3954,27 +4339,23 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
         elif action == 'node_flatten' and nid:
             node = dict(self.mod_project.merged_nodes.get(nid, {}))
             if node:
+                self._push_undo(f"flatten {nid}")
                 graph.set_node(nid, node['x'], node['y'], node['z'],
                                0.0, node.get('rotY',0), 0.0,
                                node.get('flipSwitchStand',False))
 
-                self.mod_project._rebuild_merge()
-                self._mark_measure_cache_dirty()
-                graph.save()
-                if self.bridge: self.bridge.reload_tracks(str(graph.path))
+                self._commit_mod_layer_edit(graph, graph_changed=True)
                 self._set_status(f"Flattened {nid}")
         elif action == 'node_reverse' and nid:
             node = dict(self.mod_project.merged_nodes.get(nid, {}))
             if node:
+                self._push_undo(f"reverse node {nid}")
                 new_rotY = (node.get('rotY',0) + 180) % 360
                 graph.set_node(nid, node['x'], node['y'], node['z'],
                                node.get('rotX',0), new_rotY, node.get('rotZ',0),
                                node.get('flipSwitchStand',False))
 
-                self.mod_project._rebuild_merge()
-                self._mark_measure_cache_dirty()
-                graph.save()
-                if self.bridge: self.bridge.reload_tracks(str(graph.path))
+                self._commit_mod_layer_edit(graph, graph_changed=True)
                 self._set_status(f"Reversed {nid}  rotY={new_rotY:.1f}°")
         elif action.startswith('rotY_') and nid:
             node = dict(self.mod_project.merged_nodes.get(nid, {}))
@@ -3989,17 +4370,31 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
                 except ValueError:
                     delta = 0.0
                 new_rotY = (node.get('rotY', 0) + delta) % 360
+                self._push_undo(f"rotate {nid}")
                 graph.set_node(nid, node['x'], node['y'], node['z'],
                                node.get('rotX',0), new_rotY, node.get('rotZ',0),
                                node.get('flipSwitchStand',False))
 
-                self.mod_project._rebuild_merge()
-                self._mark_measure_cache_dirty()
-                graph.save()
-                if self.bridge: self.bridge.reload_tracks(str(graph.path))
+                self._commit_mod_layer_edit(graph, graph_changed=True)
                 self._set_status(f"{nid}  rotY={new_rotY:.3f}°")
 
         # --- Segment actions ---
+        elif action.startswith('seg_gauge_') and sid:
+            gauge = normalize_track_gauge(action[len('seg_gauge_'):])
+            seg = dict(self.mod_project.merged_segments.get(sid, {}))
+            if seg:
+                self._push_undo(f"gauge {sid}")
+                graph.set_segment(
+                    sid, seg['startId'], seg['endId'],
+                    seg.get('trackClass', 'Mainline'),
+                    seg.get('style', 'Standard'),
+                    seg.get('speedLimit', 45),
+                    seg.get('priority', 0),
+                    seg.get('groupId', ''),
+                    gauge,
+                )
+                self._commit_mod_layer_edit(graph, graph_changed=True)
+                self._set_status(f"{sid}  gauge={gauge}")
         elif action.startswith('seg_class_') and sid:
             tc  = action[len('seg_class_'):]
             seg = dict(self.mod_project.merged_segments.get(sid, {}))
@@ -4008,12 +4403,10 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
                 graph.set_segment(sid, seg['startId'], seg['endId'],
                                   tc, seg.get('style','Standard'),
                                   seg.get('speedLimit',45), seg.get('priority',0),
-                                  seg.get('groupId',''))
+                                  seg.get('groupId',''),
+                                  seg.get('gauge','Standard'))
 
-                self.mod_project._rebuild_merge()
-                self._mark_measure_cache_dirty()
-                graph.save()
-                if self.bridge: self.bridge.reload_tracks(str(graph.path))
+                self._commit_mod_layer_edit(graph, graph_changed=True)
                 self._set_status(f"{sid}  class={tc}")
         elif action.startswith('seg_style_') and sid:
             st  = action[len('seg_style_'):]
@@ -4024,12 +4417,10 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
                                   seg.get('trackClass','Mainline'),
                                   st,
                                   seg.get('speedLimit',45), seg.get('priority',0),
-                                  seg.get('groupId',''))
+                                  seg.get('groupId',''),
+                                  seg.get('gauge','Standard'))
 
-                self.mod_project._rebuild_merge()
-                self._mark_measure_cache_dirty()
-                graph.save()
-                if self.bridge: self.bridge.reload_tracks(str(graph.path))
+                self._commit_mod_layer_edit(graph, graph_changed=True)
                 self._set_status(f"{sid}  style={st}")
         elif action.startswith('spd_') and sid:
             delta = {'spd_m25':-25,'spd_m10':-10,'spd_m5':-5,'spd_m1':-1,
@@ -4043,12 +4434,10 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
                                   seg.get('trackClass','Mainline'),
                                   seg.get('style','Standard'),
                                   new_spd, seg.get('priority',0),
-                                  seg.get('groupId',''))
+                                  seg.get('groupId',''),
+                                  seg.get('gauge','Standard'))
 
-                self.mod_project._rebuild_merge()
-                self._mark_measure_cache_dirty()
-                graph.save()
-                if self.bridge: self.bridge.reload_tracks(str(graph.path))
+                self._commit_mod_layer_edit(graph, graph_changed=True)
                 self._set_status(f"{sid}  speed={new_spd}mph")
         elif action == 'node_merge' and nid:
             self.merge_selected_node()
@@ -4063,16 +4452,15 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
         elif action == 'seg_reverse' and sid:
             seg = dict(self.mod_project.merged_segments.get(sid, {}))
             if seg:
+                self._push_undo(f"reverse segment {sid}")
                 graph.set_segment(sid, seg['endId'], seg['startId'],
                                   seg.get('trackClass','Mainline'),
                                   seg.get('style','Standard'),
                                   seg.get('speedLimit',45), seg.get('priority',0),
-                                  seg.get('groupId',''))
+                                  seg.get('groupId',''),
+                                  seg.get('gauge','Standard'))
 
-                self.mod_project._rebuild_merge()
-                self._mark_measure_cache_dirty()
-                graph.save()
-                if self.bridge: self.bridge.reload_tracks(str(graph.path))
+                self._commit_mod_layer_edit(graph, graph_changed=True)
                 self._set_status(f"Reversed {sid}")
 
     def create_node_at(self, sx: float, sy: float):
@@ -4100,11 +4488,11 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
         self._push_undo(f"create node {nid}")
         graph.set_node(nid, ux, uy, uz, 0.0, 0.0, 0.0, False)
 
-        self.mod_project._rebuild_merge()
-        self._mark_measure_cache_dirty()
-        graph.save()
-        if self.bridge:
-            self.bridge.reload_tracks(str(graph.path))
+        self._commit_mod_layer_edit(graph, graph_changed=True)
+        # A standalone node has no segment to make it visible. Node overlays
+        # default to off, so enable the track/node layers after placement.
+        self.show_tracks = True
+        self.show_nodes = True
         # Remember Y for inherit mode
         self._last_placed_y = uy
         self._last_placed_node_id = nid
@@ -4142,15 +4530,12 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
             self._set_status(msg)
         elif self.sel_mod_seg_id:
             sid = self.sel_mod_seg_id
+            self._push_undo(f"delete segment {sid}")
             graph.delete_segment(sid)
             self.sel_mod_seg_id = None
             self._set_status(f"Deleted segment {sid}")
 
-        self.mod_project._rebuild_merge()
-        self._mark_measure_cache_dirty()
-        graph.save()
-        if self.bridge:
-            self.bridge.reload_tracks(str(graph.path))
+        self._commit_mod_layer_edit(graph, graph_changed=True)
 
     def start_connect(self):
         """Begin connecting from selected node — next node click completes the segment."""
@@ -4174,13 +4559,10 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
         sid = self.mod_project.next_seg_id()
         self._push_undo(f"create segment {sid}")
         graph.set_segment(sid, self._connect_from_node, target_node_id,
-                          'Mainline', 'Standard', 45, 0, '')
+                          'Mainline', 'Standard', 45, 0, '',
+                          getattr(self, 'geo_gauge', 'Standard'))
 
-        self.mod_project._rebuild_merge()
-        self._mark_measure_cache_dirty()
-        graph.save()
-        if self.bridge:
-            self.bridge.reload_tracks(str(graph.path))
+        self._commit_mod_layer_edit(graph, graph_changed=True)
         self._set_status(
             f"Created segment {sid}: {self._connect_from_node} → {target_node_id}")
         self.sel_mod_seg_id    = sid
@@ -4217,73 +4599,180 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
             return n0.get('rotY', 0)
         return _m.degrees(_m.atan2(dx, dz)) % 360
 
-    def _add_turnout_leg(self, sw_node_id: str):
+    def _bezier_tangent_rotX(
+            self, n0: dict, n1: dict, t: float = 0.5) -> float:
+        """Pitch of the 3D bezier tangent in the n0-to-n1 direction."""
+        p0, p1, p2, p3 = _bezier_control_points(n0, n1)
+        omt = 1.0 - float(t)
+        dx = (
+            3.0 * omt * omt * (p1[0] - p0[0])
+            + 6.0 * omt * t * (p2[0] - p1[0])
+            + 3.0 * t * t * (p3[0] - p2[0])
+        )
+        dy = (
+            3.0 * omt * omt * (p1[1] - p0[1])
+            + 6.0 * omt * t * (p2[1] - p1[1])
+            + 3.0 * t * t * (p3[1] - p2[1])
+        )
+        dz = (
+            3.0 * omt * omt * (p1[2] - p0[2])
+            + 6.0 * omt * t * (p2[2] - p1[2])
+            + 3.0 * t * t * (p3[2] - p2[2])
+        )
+        plan_run = math.hypot(dx, dz)
+        if plan_run < 0.001:
+            return float(n0.get('rotX', 0.0))
+        return -math.degrees(math.atan2(dy, plan_run))
+
+    def _turnout_settings_error(self):
+        leg = float(self.turnout_leg_length)
+        angle = abs(float(self.turnout_diverge_angle))
+        if leg < float(self.turnout_min_leg_m):
+            return (
+                f"Turnout leg {leg:.1f} m is under the "
+                f"{self.turnout_min_leg_m:.0f} m minimum"
+            )
+        if angle < 1.0 or angle > float(self.turnout_max_angle_deg):
+            return (
+                f"Turnout angle must be between 1 and "
+                f"{self.turnout_max_angle_deg:.0f} degrees"
+            )
+        radius = turnout_radius_for_chord(leg, angle)
+        if radius is None or radius < float(self.alignment_min_radius_m):
+            radius_text = "unknown" if radius is None else f"{radius:.1f} m"
+            return (
+                f"Turnout radius {radius_text} is under the "
+                f"{self.alignment_min_radius_m:.0f} m minimum"
+            )
+        return None
+
+    def _turnout_approach_grade_pct(
+            self, sw: dict, approach_rot_y: float,
+            entry_segs: list, forward_segs: list) -> float:
+        """Estimate the tangent grade through a proposed turnout frog."""
+        grades = []
+        grade_sources = [
+            (segment, 'startId', True) for segment in entry_segs[:1]
+        ]
+        grade_sources.extend(
+            (segment, 'endId', False) for segment in forward_segs[:1]
+        )
+        for segment, other_key, incoming in grade_sources:
+            other = self.mod_project.merged_nodes.get(segment.get(other_key, ''))
+            if not other:
+                continue
+            run = math.hypot(
+                float(sw.get('x', 0.0)) - float(other.get('x', 0.0)),
+                float(sw.get('z', 0.0)) - float(other.get('z', 0.0)),
+            )
+            if run < 0.01:
+                continue
+            rise = (
+                float(sw.get('y', 0.0)) - float(other.get('y', 0.0))
+                if incoming else
+                float(other.get('y', 0.0)) - float(sw.get('y', 0.0))
+            )
+            grades.append(rise / run * 100.0)
+
+        if grades:
+            return sum(grades) / len(grades)
+
+        # A standalone switch can still preserve the pitch already stored on
+        # the node. Account for a possible 180-degree yaw-axis reversal.
+        local_grade = -math.tan(math.radians(float(sw.get('rotX', 0.0)))) * 100.0
+        node_yaw = math.radians(float(sw.get('rotY', approach_rot_y)))
+        approach_yaw = math.radians(float(approach_rot_y))
+        orientation = 1.0 if (
+            math.sin(node_yaw) * math.sin(approach_yaw)
+            + math.cos(node_yaw) * math.cos(approach_yaw)
+        ) >= 0.0 else -1.0
+        return local_grade * orientation
+
+    def _add_turnout_leg(
+            self, sw_node_id: str, commit: bool = True) -> bool:
         """Add diverge leg to a switch node after inserting it into a segment.
         switch rotY = approach direction. diverge turns by turnout_diverge_angle."""
-        import math
         if not self.mod_project:
-            return
+            return False
         graph = self.mod_project.get_graph_layer()
         if not graph:
-            return
+            return False
         sw = self.mod_project.merged_nodes.get(sw_node_id)
         if not sw:
-            return
+            return False
+        settings_error = self._turnout_settings_error()
+        if settings_error:
+            self._set_status(settings_error)
+            return False
 
         pid = self.mod_project.definition.get('id','T').replace('.','_')[:6]
 
         # Approach = direction of entry segment arriving at sw
         conn      = self.mod_project.segments_for_node(sw_node_id)
-        entry_seg = next((s for s in conn if s.get('endId') == sw_node_id), None)
+        entry_segs = [s for s in conn if s.get('endId') == sw_node_id]
+        forward_segs = [s for s in conn if s.get('startId') == sw_node_id]
+        entry_seg = entry_segs[0] if entry_segs else None
         approach_rotY = sw.get('rotY', 0)
         if entry_seg:
             n0 = self.mod_project.merged_nodes.get(entry_seg['startId'])
             if n0:
                 approach_rotY = self._bezier_tangent_rotY(n0, sw, t=1.0)
 
-        sign     = 1.0 if self.turnout_direction == 'right' else -1.0
-        div_rotY = (approach_rotY + sign * float(self.turnout_diverge_angle)) % 360
-        leg      = float(self.turnout_leg_length)
-        r        = math.radians(div_rotY)
-        div_x    = sw['x'] + leg * math.sin(r)
-        div_z    = sw['z'] + leg * math.cos(r)
-        div_y    = self._sample_terrain_y(div_x, div_z) or sw['y']
+        sign = 1.0 if self.turnout_direction == 'right' else -1.0
+        leg = float(self.turnout_leg_length)
+        grade_pct = self._turnout_approach_grade_pct(
+            sw, approach_rotY, entry_segs, forward_segs,
+        )
+        div_x, div_y, div_z, div_rot_x, div_rotY = turnout_leg_pose(
+            float(sw['x']), float(sw['y']), float(sw['z']),
+            approach_rotY,
+            sign * float(self.turnout_diverge_angle),
+            leg,
+            grade_pct=grade_pct,
+        )
+        sw_rot_x = -math.degrees(math.atan(grade_pct / 100.0))
 
         # Generate unique IDs — pass exclude set so they don't collide with each other
         div_sid = self.mod_project.next_seg_id()
         div_nid = self.mod_project.next_node_id({div_sid})
 
         # Place diverge node
-        graph.set_node(div_nid, div_x, div_y, div_z, 0, div_rotY, 0, False)
+        graph.set_node(
+            div_nid, div_x, div_y, div_z,
+            div_rot_x, div_rotY, 0, False,
+        )
         # switch_node → diverge_node
         graph.set_segment(div_sid, sw_node_id, div_nid,
                           self.turnout_div_class, 'Standard',
-                          int(self.turnout_div_speed), 0, '')
+                          int(self.turnout_div_speed), 0, '',
+                          getattr(self, 'geo_gauge', 'Standard'))
         # Update switch node: rotY = approach, flipSwitchStand as set
         graph.set_node(sw_node_id, sw['x'], sw['y'], sw['z'],
-                       sw.get('rotX',0), approach_rotY,
+                       sw_rot_x, approach_rotY,
                        sw.get('rotZ',0), self.turnout_flip)
 
-        self.mod_project._rebuild_merge()
-        self._mark_measure_cache_dirty()
-        graph.save()
-        if self.bridge: self.bridge.reload_tracks(str(graph.path))
+        if commit:
+            self._commit_mod_layer_edit(graph, graph_changed=True)
         self._set_status(
             f"Turnout: sw={sw_node_id}  approach={approach_rotY:.1f}°  "
             f"diverge {self.turnout_direction} {self.turnout_diverge_angle}° → {div_nid}")
 
-    def _insert_node_into_segment(self, node_id: str, seg_id: str):
+        return True
+
+    def _insert_node_into_segment(
+            self, node_id: str, seg_id: str,
+            commit: bool = True) -> bool:
         """Insert node_id into seg_id, replacing it with two new segments.
         Sets the inserted node's rotY to the bezier tangent direction at insertion point."""
         if not self.mod_project:
-            return
+            return False
         graph = self.mod_project.get_graph_layer()
         if not graph:
-            return
+            return False
         seg = self.mod_project.merged_segments.get(seg_id)
         if not seg:
             self._set_status(f"Segment {seg_id} not found")
-            return
+            return False
         start_id = seg['startId']
         end_id   = seg['endId']
         tc       = seg.get('trackClass','Mainline')
@@ -4291,6 +4780,7 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
         spd      = seg.get('speedLimit',45)
         pri      = seg.get('priority',0)
         grp      = seg.get('groupId','')
+        gauge    = seg.get('gauge','Standard')
 
         # Compute the tangent direction at the node's position along the segment
         n0s = self.mod_project.merged_nodes.get(start_id)
@@ -4307,26 +4797,53 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
             else:
                 t = 0.5
             correct_rotY = self._bezier_tangent_rotY(n0s, n1s, t)
+            correct_rotX = self._bezier_tangent_rotX(n0s, n1s, t)
             # Update node with correct heading
             graph.set_node(node_id, node['x'], node['y'], node['z'],
-                           node.get('rotX',0), correct_rotY,
+                           correct_rotX, correct_rotY,
                            node.get('rotZ',0), node.get('flipSwitchStand',False))
 
         # Delete original segment, create two new ones
         graph.delete_segment(seg_id)
         sid_a = self.mod_project.next_seg_id()
         sid_b = self.mod_project.next_seg_id({sid_a})
-        graph.set_segment(sid_a, start_id, node_id, tc, st, spd, pri, grp)
-        graph.set_segment(sid_b, node_id, end_id,   tc, st, spd, pri, grp)
+        graph.set_segment(
+            sid_a, start_id, node_id, tc, st, spd, pri, grp, gauge
+        )
+        graph.set_segment(
+            sid_b, node_id, end_id, tc, st, spd, pri, grp, gauge
+        )
 
-        self.mod_project._rebuild_merge()
-        self._mark_measure_cache_dirty()
-        graph.save()
-        if self.bridge: self.bridge.reload_tracks(str(graph.path))
+        if commit:
+            self._commit_mod_layer_edit(graph, graph_changed=True)
+        else:
+            self.mod_project._rebuild_merge()
         self.sel_mod_node_id = node_id
         self.sel_mod_seg_id  = None
         self._set_status(
             f"Inserted {node_id} into {seg_id} → [{sid_a}] + [{sid_b}]")
+
+        return True
+
+    def _insert_turnout_into_segment(
+            self, node_id: str, seg_id: str) -> bool:
+        """Split a segment and add its diverging leg as one saved edit."""
+        settings_error = self._turnout_settings_error()
+        if settings_error:
+            self._set_status(settings_error)
+            return False
+        if not self._insert_node_into_segment(
+                node_id, seg_id, commit=False):
+            return False
+        if not self._add_turnout_leg(node_id, commit=False):
+            return False
+        graph = self.mod_project.get_graph_layer()
+        if graph is None:
+            return False
+        self._commit_mod_layer_edit(graph, graph_changed=True)
+        self.sel_mod_node_id = node_id
+        self.sel_mod_seg_id = None
+        return True
 
     def _commit_node_drag(self, node_id: str, new_ux: float, new_uz: float):
         """Write the moved node to the mod game-graph layer and trigger SC reload."""
@@ -4359,19 +4876,14 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
                              rotX, rotY, rotZ, flip)
         # Full rebuild — updates merged_nodes then rebuilds all layer curves
 
-        self.mod_project._rebuild_merge()
-        self._mark_measure_cache_dirty()
-
         # Update the selected node's layer index to graph layer
         for i, l in enumerate(self.mod_project.layers):
             if l is graph_layer:
                 self.sel_mod_layer_idx = i
                 break
 
-        # Save and hot-reload
-        graph_layer.save()
-        if self.bridge:
-            self.bridge.reload_tracks(str(graph_layer.path))
+        # Refresh all curves, then save and hot-reload.
+        self._commit_mod_layer_edit(graph_layer, graph_changed=True)
 
         self._set_status(
             f"Moved {node_id} → ({new_ux:.1f}, {new_y:.1f}, {new_uz:.1f})  "
@@ -4482,6 +4994,7 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
                     game_dir = str(parent)
                     break
         self.bridge = RailroaderBridge(game_dir=game_dir)
+        self._configure_bridge(self.bridge)
         self.bridge.on_state_update = self._on_bridge_state
         self.bridge.on_connect    = lambda: self._set_status("Bridge: Railroader connected ●")
         self.bridge.on_disconnect = lambda: self._set_status("Bridge: Railroader disconnected")
@@ -4571,17 +5084,33 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
         with self._bridge_lock:
             state = self._bridge_pending_state
             self._bridge_pending_state = None
+            editor_commands = self._bridge_pending_editor_commands[:]
+            self._bridge_pending_editor_commands.clear()
             if self.bridge is not None:
                 self.bridge_connected = self.bridge.connected
+        for command in editor_commands:
+            self._handle_editor_bridge_command(command)
+        self._update_game_sync_locks()
         if state is not None:
             # Only rebuild the geometry if something actually changed
-            fingerprint = (len(state.nodes), len(state.segments))
+            fingerprint = self._bridge_track_fingerprint(state)
             if fingerprint != self._bridge_last_fingerprint:
                 self._bridge_last_fingerprint = fingerprint
                 self._apply_bridge_state(state)
             else:
                 # Just update cars — cheap
                 self.bridge_cars = list(state.cars)
+
+        now = time.monotonic()
+        if (
+            self.bridge is not None
+            and now - self._last_editor_state_publish >= 0.5
+        ):
+            self._last_editor_state_publish = now
+            try:
+                self.bridge.publish_editor_state(self._editor_bridge_state())
+            except OSError:
+                pass
 
     # ------------------------------------------------------------------
     # Coordinate math
@@ -5182,6 +5711,11 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
 
     def _paint_at(self, sx, sy, erase=False):
         """Apply brush centred at screen pos (sx, sy)."""
+        if getattr(self, '_game_terrain_sync_locked', False):
+            self._set_status(
+                "Game has unsaved terrain edits; save or undo them "
+                "before painting on desktop")
+            return
         # Erosion brush delegates to its own method
         if self.mode == 'height' and self.brush_mode == 'erode':
             erode_mode = 'hydraulic' if erase else 'thermal'
@@ -5356,11 +5890,26 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
         save_parts = []
 
         if dirty_tiles:
+            if getattr(self, '_game_terrain_sync_locked', False):
+                self._set_status(
+                    "Game has unsaved terrain edits; desktop terrain save "
+                    "is paused")
+                return
             saved_tiles = 0
+            saved_tile_paths = []
             for tile in dirty_tiles:
                 if tile.save():
                     saved_tiles += 1
+                    if tile.path is not None:
+                        saved_tile_paths.append(str(tile.path))
             save_parts.append(f"{saved_tiles} tile(s)")
+            if (
+                saved_tile_paths
+                and self.bridge is not None
+                and self.bridge.connected
+            ):
+                self.bridge.reload_terrain_tiles(
+                    saved_tile_paths)
 
         if self.mod_project and (
                 self.mod_project.dirty or
@@ -5432,15 +5981,23 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
 
     def _osm_bounds(self, tx: int, ty: int) -> tuple:
         """Return ((min_lat,min_lon),(max_lat,max_lon)) for editor tile (tx,ty)."""
-        return _gen_tile_bounds(tx, ty)
+        return _gen_tile_bounds(
+            tx, ty,
+            origin_lat=self.map_origin_lat,
+            origin_lon=self.map_origin_lon,
+            tile_dimension_m=self.map_tile_dimension_m,
+            origin_e_bias=self.map_origin_e_bias,
+            origin_n_bias=self.map_origin_n_bias,
+        )
 
     def toggle_osm(self):
         """Toggle OSM map overlay."""
         self.osm.enabled = not self.osm.enabled
         if self.osm.enabled:
             self.osm.invalidate()   # clear stale surfaces on re-enable
+        georef = f"{self.map_origin_lat:.5f}, {self.map_origin_lon:.5f}"
         self._set_status(
-            f"OSM overlay ON  (opacity {self.osm.opacity}  zoom z{self.osm.zoom})"
+            f"OSM overlay ON  ({georef}; opacity {self.osm.opacity}  zoom z{self.osm.zoom})"
             if self.osm.enabled else "OSM overlay OFF")
 
     def _adjust_osm_zoom(self, delta):
@@ -6072,14 +6629,26 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
                  ("Placement Y",       "Use terrain, fixed Y, or inherit from the last node"),
                  ("Grade Set Start",   "Start an ordered chain from the selected node"),
                  ("Grade Add Node",    "Append more nodes to the chain"),
-                 ("Smooth Grade",      "Interpolate Y across the chain by distance"),
-                 ("Apply Grade %",     "Force a constant percent grade over the chain"),],
+                 ("Smooth Grade",      "Interpolate Y and recalculate pitch across the chain"),
+                 ("Apply Grade %",     "Force a constant grade and matching node pitch"),],
                 [("Straighten XZ",     "Keep heights but straighten the chain in plan view"),
                  ("Turnout",           "Build a switch from the selected frog node"),
                  ("Leg minimum",       "Turnout safety blocks legs shorter than the safe minimum"),
                  ("Angle limits",      "Preferred diverge <= 12 deg, hard block above 15 deg"),
                  ("Diverge radius",    "Blocked if the solved branch radius is too tight"),
                  ("Warnings",          "Sharp geometry and odd speed combos are flagged"),]
+            )
+            cy += 2
+            heading("Smooth vertical transitions")
+            two_col(
+                [("Start grade",       "Grade entering the selected chain"),
+                 ("Hold grade",        "Constant grade between the two transition curves"),
+                 ("End grade",         "Grade leaving the selected chain"),
+                 ("Entry / Exit m",    "Length of each parabolic vertical curve"),],
+                [("Read Current Ends", "Seed start/end grade from the current track"),
+                 ("Preview",           "Open Profile with proposed curve in purple"),
+                 ("Apply",             "Write Y and correctly signed rotX as one undo step"),
+                 ("Mousewheel",        "Scroll long Geometry panels to reach every control"),]
             )
             cy += 2
             heading("Preview, blockers, and commit")
@@ -6394,11 +6963,14 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
                 ("End",        seg.get('endId',''),      (180,220,180)),
                 ("Class",      seg.get('trackClass',''), (220,200,140)),
                 ("Style",      seg.get('style',''),      (200,180,220)),
+                ("Gauge",      normalize_track_gauge(
+                    seg.get('gauge', 'Standard')
+                ), (255,170,100)),
                 ("Speed",      str(seg.get('speedLimit','')), (160,200,220)),
                 ("Priority",   str(seg.get('priority','')),   (160,200,220)),
                 ("GroupID",    seg.get('groupId',''),    (160,180,200)),
             ]
-            n_rows = len(fields) + (7 if is_mod else 0)  # class+style+speed+pri/grp+del rows
+            n_rows = len(fields) + (8 if is_mod else 0)
 
         ph2 = 10 + n_rows * row_h + 10
         # Clamp panel so it never runs off the bottom of the window
@@ -6423,7 +6995,7 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
         EDITABLE_NODE = {'X','Y','Z','RotY','RotX','RotZ','ID'}
         EDITABLE_SEG  = {'Speed','Priority','GroupID','ID'}
         BOOLEAN_FIELDS = {'Flip'}
-        READONLY = {'Layer','Class','Style','Start','End'}
+        READONLY = {'Layer','Class','Style','Gauge','Start','End'}
 
         field_w = pw2 - 100
         for label, value, col in fields:
@@ -6534,6 +7106,55 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
                 # ---- Segment inline editing ----
 
                 # Track Class — full names, coloured by type
+                self.font.render_to(surf, (cx2, cy2), "Gauge:", (100,120,140))
+                bx3 = cx2 + 42
+                cur_gauge = normalize_track_gauge(
+                    seg.get('gauge', 'Standard')
+                )
+                gauge_choices = [
+                    ('Std', 'Standard'),
+                    ('3ft', 'Narrow'),
+                    ('Dual', 'DualGauge'),
+                    ('L', 'DualGauge_L'),
+                    ('R', 'DualGauge_R'),
+                    ('Trans', 'DualGauge_T'),
+                ]
+                for gauge_label, gauge_value in gauge_choices:
+                    bw3 = self.font.get_rect(gauge_label).width + 8
+                    r3 = pygame.Rect(bx3, cy2 - 1, bw3, row_h)
+                    active3 = cur_gauge == gauge_value
+                    hover3 = r3.collidepoint(mx0, my0)
+                    color3 = (
+                        (245, 64, 210)
+                        if gauge_value == 'DualGauge_T'
+                        else (110, 184, 255)
+                        if gauge_value.startswith('DualGauge')
+                        else (255, 122, 20)
+                        if gauge_value == 'Narrow'
+                        else (180, 160, 70)
+                    )
+                    pygame.draw.rect(
+                        surf,
+                        color3 if active3 else (
+                            tuple(v // 2 for v in color3)
+                            if hover3 else (20, 28, 36)
+                        ),
+                        r3,
+                        border_radius=2,
+                    )
+                    pygame.draw.rect(surf, color3, r3, 1, border_radius=2)
+                    self.font.render_to(
+                        surf,
+                        (bx3 + 4, cy2),
+                        gauge_label,
+                        (245, 245, 245) if active3 else (150, 170, 185),
+                    )
+                    self._prop_action_rects.append(
+                        (r3, f"seg_gauge_{gauge_value}")
+                    )
+                    bx3 += bw3 + 3
+                cy2 += row_h + 2
+
                 self.font.render_to(surf, (cx2, cy2), "Class:", (100,120,140))
                 bx3 = cx2 + 42
                 cur_tc = seg.get('trackClass','')
@@ -8682,6 +9303,100 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
             self._mod_undo_stack.pop()
             self._set_status("Trestle failed — segment nodes not found")
 
+    def _fit_selected_trestle_to_track(self):
+        """Refit the selected AutoTrestle to its matching track Bezier."""
+        if not self.mod_project or not self.sel_spliney_id:
+            self._set_status("Select a trestle control point first")
+            return
+        layer_idx = self.sel_spliney_layer
+        if layer_idx is None or not (0 <= layer_idx < len(self.mod_project.layers)):
+            self._set_status("The selected trestle layer is unavailable")
+            return
+        layer = self.mod_project.layers[layer_idx]
+        spliney = layer.splineys.get(self.sel_spliney_id)
+        if not spliney or 'AutoTrestle' not in str(spliney.get('handler', '')):
+            self._set_status("The selected spliney is not an AutoTrestle")
+            return
+        points = [
+            point for point in spliney.get('points', [])
+            if isinstance(point, dict) and isinstance(point.get('position'), dict)
+        ]
+        if len(points) < 2:
+            self._set_status("The trestle needs at least two points")
+            return
+
+        start = points[0]['position']
+        end = points[-1]['position']
+
+        def endpoint_distance(point, node):
+            return math.sqrt(
+                (float(point.get('x', 0.0)) - float(node.get('x', 0.0))) ** 2
+                + (float(point.get('y', 0.0)) - float(node.get('y', 0.0))) ** 2
+                + (float(point.get('z', 0.0)) - float(node.get('z', 0.0))) ** 2
+            )
+
+        def score_segment(segment):
+            node_a = self.mod_project.merged_nodes.get(segment.get('startId', ''))
+            node_b = self.mod_project.merged_nodes.get(segment.get('endId', ''))
+            if not node_a or not node_b:
+                return None
+            direct = (
+                endpoint_distance(start, node_a),
+                endpoint_distance(end, node_b),
+            )
+            reverse = (
+                endpoint_distance(start, node_b),
+                endpoint_distance(end, node_a),
+            )
+            chosen = direct if sum(direct) <= sum(reverse) else reverse
+            return max(chosen), sum(chosen)
+
+        candidates = []
+        for segment_id, segment in self.mod_project.merged_segments.items():
+            if not segment or segment.get('deleted'):
+                continue
+            score = score_segment(segment)
+            if score is not None:
+                candidates.append((score[0], score[1], segment_id, segment))
+        if not candidates:
+            self._set_status("No track segments are available for this trestle")
+            return
+
+        candidates.sort(key=lambda item: (item[0], item[1]))
+        selected_candidate = next(
+            (
+                item for item in candidates
+                if item[2] == self.sel_mod_seg_id and item[0] <= 25.0
+            ),
+            None,
+        )
+        best = selected_candidate or candidates[0]
+        max_endpoint_distance, _total_distance, segment_id, segment = best
+        if max_endpoint_distance > 25.0:
+            self._set_status(
+                "No matching track found within 25 m of both trestle ends"
+            )
+            return
+
+        self._push_undo(f"fit trestle {self.sel_spliney_id} to {segment_id}")
+        if not fit_trestle_to_segment(
+            layer,
+            self.sel_spliney_id,
+            segment,
+            self.mod_project.merged_nodes,
+        ):
+            self._mod_undo_stack.pop()
+            self._set_status("Could not fit the trestle to that segment")
+            return
+        layer.save()
+        self.mod_project._rebuild_merge()
+        fitted = layer.splineys[self.sel_spliney_id].get('points', [])
+        self.sel_spliney_pt = min(self.sel_spliney_pt, len(fitted) - 1)
+        self._set_status(
+            f"{self.sel_spliney_id} fitted to {segment_id} "
+            f"with {len(fitted)} Bezier samples"
+        )
+
     # ------------------------------------------------------------------
     # Scenery panel
     # ------------------------------------------------------------------
@@ -8725,7 +9440,11 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
         text_w = pw2 - 20
         header_text = f"Spliney Point: {self.sel_spliney_id}[{self.sel_spliney_pt}]"
         layer_text = f"Layer: {layer.label}  Handler: {spl.get('handler','').split('.')[-1]}"
+        is_trestle = 'AutoTrestle' in str(spl.get('handler', ''))
         tools_text = (
+            "Trestle tools. Fit Trestle to Track finds the matching rail segment "
+            "and resamples its exact 3D Bezier, including grade and pitch."
+            if is_trestle else
             "Road/river point tools. Zoom in and click a control dot to edit another point. "
             "Use Grade % with Smooth Grade or Apply Grade to reshape elevation, or Auto Pitch to tilt along the span."
         )
@@ -8750,7 +9469,7 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
 
         field_rows = 7 + (1 if width is not None else 0)
         nudges = [(90,0.001),(45,0.01),(30,0.05),(15,0.1),(10,1),(5,5)]
-        action_rows = 4
+        action_rows = 5 if is_trestle else 4
 
         def wrap_lines_local(font_obj, text, max_w):
             text = str(text)
@@ -8902,6 +9621,15 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
             ("Ins After", "spl_ins_after", (180,120,60), self.sel_spliney_pt + 1 < len(pts)),
             ("Delete Spliney" if len(pts) <= 2 else "Delete Pt", "spl_del_pt", (160,80,80), len(pts) >= 2),
         ])
+        if is_trestle:
+            draw_action_row([
+                (
+                    "Fit Trestle to Track",
+                    "spl_fit_trestle",
+                    (160, 115, 45),
+                    len(pts) >= 2,
+                ),
+            ])
         draw_action_row([
             (
                 "Clear Range" if range_state.get('ready')
@@ -8955,6 +9683,8 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
                 self._spl_insert_point(after=True)
             elif key == 'spl_del_pt':
                 self._spl_delete_point()
+            elif key == 'spl_fit_trestle':
+                self._fit_selected_trestle_to_track()
             elif key == 'spl_range_anchor':
                 self._toggle_spliney_range_anchor()
             elif key == 'spl_fill_width_range':
@@ -9235,11 +9965,17 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
 
         self._scenery_rects = []
 
-        # Collect all scenery
+        # Collect the final merged view. A null in the writable mixinto must
+        # hide scenery from an earlier layer instead of leaving it in the list.
         all_sc = {}
-        for li, layer in enumerate(self.mod_project.layers):
-            for sid2, sv in layer.scenery.items():
-                if sv: all_sc[sid2] = (sv, li)
+        for sid2, sv in self.mod_project.merged_scenery.items():
+            source_layer_idx = 0
+            for li in range(len(self.mod_project.layers) - 1, -1, -1):
+                layer = self.mod_project.layers[li]
+                if layer.visible and isinstance(layer.scenery.get(sid2), dict):
+                    source_layer_idx = li
+                    break
+            all_sc[sid2] = (sv, source_layer_idx)
 
         self.font.render_to(surf, (cx, cy),
             f"{len(all_sc)} objects placed", (140,160,180))
@@ -9272,6 +10008,36 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
             self._scenery_rects.append((r3, act3))
             bx3 += bw3 + 3
         self.font.render_to(surf,(bx3+4,cy),f"{self.scenery_place_rotY:.0f}°",(200,180,140))
+        cy += 20
+
+        # Uniform scale controls
+        self.font.render_to(surf, (cx, cy), "Scale:", (100,120,140))
+        bx_scale = cx + 44
+        for lbl_scale, act_scale in [
+                ("-0.1", "sscale_m"),
+                ("Reset", "sscale_reset"),
+                ("+0.1", "sscale_p")]:
+            bw_scale = self.font.get_rect(lbl_scale).width + 8
+            r_scale = pygame.Rect(bx_scale, cy-1, bw_scale, 16)
+            hov_scale = r_scale.collidepoint(mx0, my0)
+            pygame.draw.rect(
+                surf,
+                (60, 50, 90) if hov_scale else (30, 25, 45),
+                r_scale,
+                border_radius=2,
+            )
+            pygame.draw.rect(surf, (130, 100, 190), r_scale, 1, border_radius=2)
+            self.font.render_to(
+                surf, (bx_scale+4, cy), lbl_scale, (220, 190, 255)
+            )
+            self._scenery_rects.append((r_scale, act_scale))
+            bx_scale += bw_scale + 4
+        self.font.render_to(
+            surf,
+            (bx_scale+4, cy),
+            f"{self.scenery_place_scale:.2f}x",
+            (220, 190, 255),
+        )
         cy += 20
 
         # Place button + place mode status
@@ -9392,8 +10158,27 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
                 delta = {'srotY_m90':-90,'srotY_m45':-45,
                          'srotY_p45': 45,'srotY_p90': 90}.get(act,0)
                 self.scenery_place_rotY = (self.scenery_place_rotY+delta)%360
+            elif act == 'sscale_m':
+                self.scenery_place_scale = max(
+                    0.1, round(self.scenery_place_scale - 0.1, 2)
+                )
+            elif act == 'sscale_p':
+                self.scenery_place_scale = min(
+                    10.0, round(self.scenery_place_scale + 0.1, 2)
+                )
+            elif act == 'sscale_reset':
+                self.scenery_place_scale = 1.0
             elif act.startswith('sc_sel:'):
                 self.sel_scenery_id = act[7:]
+                self.sel_scenery_layer = None
+                for li in range(len(self.mod_project.layers) - 1, -1, -1):
+                    layer = self.mod_project.layers[li]
+                    if (
+                        layer.visible
+                        and isinstance(layer.scenery.get(self.sel_scenery_id), dict)
+                    ):
+                        self.sel_scenery_layer = li
+                        break
             elif act == 'sc_del':
                 self._delete_selected_scenery()
             elif act == 'sc_goto':
@@ -9428,42 +10213,57 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
             return
         ux, uz = self.screen_to_unity(sx, sy)
         uy = self._sample_terrain_y(ux, uz)
-        sid2 = next_scenery_id(graph, set(graph.scenery.keys()))
+        existing_ids = set(self.mod_project.merged_scenery) | set(graph.scenery)
+        sid2 = next_scenery_id(graph, existing_ids)
         self._push_undo(f"place scenery {sid2}")
-        scenery_set(graph, sid2, self.scenery_place_model,
-                    ux, uy, uz, self.scenery_place_rotY, self.scenery_place_scale)
-        graph.save()
+        scenery_set(
+            graph,
+            sid2,
+            self.scenery_place_model,
+            ux,
+            uy,
+            uz,
+            rotY=self.scenery_place_rotY,
+            scale_x=self.scenery_place_scale,
+            scale_y=self.scenery_place_scale,
+            scale_z=self.scenery_place_scale,
+        )
+        self._commit_mod_layer_edit(graph)
         self.sel_scenery_id   = sid2
         self.sel_scenery_layer= next(i for i,l in enumerate(self.mod_project.layers)
                                      if l is graph)
-        self._set_status(f"Placed {self.scenery_place_model} as {sid2}")
+        self._set_status(
+            f"Placed {self.scenery_place_model} as {sid2}  "
+            f"Y {self.scenery_place_rotY:.0f} deg  scale {self.scenery_place_scale:.2f}"
+        )
 
     def _delete_selected_scenery(self):
         if not self.sel_scenery_id or not self.mod_project:
             return
-        for layer in self.mod_project.layers:
-            if self.sel_scenery_id in layer.scenery:
-                self._push_undo(f"del scenery {self.sel_scenery_id}")
-                scenery_delete(layer, self.sel_scenery_id)
-                layer.save()
-                self._set_status(f"Deleted {self.sel_scenery_id}")
-                self.sel_scenery_id = None
-                return
+        graph = self.mod_project.get_graph_layer()
+        if graph is None:
+            self._set_status("No writable game-graph layer for scenery deletion")
+            return
+        scenery_id = self.sel_scenery_id
+        self._push_undo(f"delete scenery {scenery_id}")
+        scenery_delete(graph, scenery_id)
+        self._commit_mod_layer_edit(graph)
+        self._set_status(f"Deleted {scenery_id}")
+        self.sel_scenery_id = None
+        self.sel_scenery_layer = None
 
     def _goto_selected_scenery(self):
         if not self.sel_scenery_id or not self.mod_project:
             return
-        for layer in self.mod_project.layers:
-            sv = layer.scenery.get(self.sel_scenery_id)
-            if sv:
-                pos = sv.get('position',{})
-                sx2, sy2 = self.unity_to_screen(pos.get('x',0), pos.get('z',0))
-                w2, h2   = self.screen.get_size()
-                self.pan_x += w2//2 - sx2
-                self.pan_y += h2//2 - sy2
-                self.scenery_panel = False
-                self._set_status(f"Panned to {self.sel_scenery_id}")
-                return
+        sv = self.mod_project.merged_scenery.get(self.sel_scenery_id)
+        if isinstance(sv, dict):
+            pos = sv.get('position',{})
+            sx2, sy2 = self.unity_to_screen(pos.get('x',0), pos.get('z',0))
+            w2, h2   = self.screen.get_size()
+            self.pan_x += w2//2 - sx2
+            self.pan_y += h2//2 - sy2
+            self.scenery_panel = False
+            self._set_status(f"Panned to {self.sel_scenery_id}")
 
 
     # ==================================================================
@@ -11422,6 +12222,8 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
         pw    = min(480, max(320, w - 20))
         top_limit = PANEL_H + 6
         bottom_limit = h - STATUS_H - 8
+        if getattr(self, 'profile_panel', False):
+            bottom_limit = min(bottom_limit, self._profile_panel_top() - 8)
         available_ph = max(260, bottom_limit - top_limit)
         row_h_tab = 26
         tabs = [('guide',   'Spliney',  (0, 170, 200)),
@@ -11573,7 +12375,11 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
         elif self.geo_mode == 'grade':
             # Grade panel grows with the node chain — enough room for node list + apply section
             chain_len = len(self.grade_chain)
-            desired_ph = max(420, 360 + min(chain_len, 13) * 15)
+            visible_chain_len = min(
+                chain_len,
+                5 if getattr(self, 'profile_panel', False) else 12,
+            )
+            desired_ph = max(610, 500 + visible_chain_len * 15)
         else:
             desired_ph = 420
         ph = max(260, min(desired_ph, available_ph))
@@ -11622,6 +12428,29 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
             tab_row_x += bw2 + 5
         cy = tab_row_y + row_h_tab + 8
         cx = px + 12
+        geo_content_top = cy
+        geo_content_view = pygame.Rect(
+            px + 2,
+            geo_content_top,
+            pw - 4,
+            max(24, py + ph - geo_content_top - 6),
+        )
+        self._geo_scroll_view_rect = geo_content_view
+        geo_scroll = max(
+            0,
+            int(self._geo_scroll_by_mode.get(self.geo_mode, 0)),
+        )
+        geo_scroll = min(
+            geo_scroll,
+            max(
+                0,
+                int(self._geo_scroll_max_by_mode.get(self.geo_mode, 0)),
+            ),
+        )
+        self._geo_scroll_by_mode[self.geo_mode] = geo_scroll
+        previous_geo_clip = surf.get_clip()
+        surf.set_clip(geo_content_view)
+        cy -= geo_scroll
 
         def num_field(label, key, value, width=70, nudge_step=None):
             nonlocal cy
@@ -11665,6 +12494,64 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
                 bx3 += bw3 + 4
             cy += 18
 
+        def gauge_row():
+            """Compact canonical gauge picker shared by every track builder."""
+            nonlocal cy
+            self.font.render_to(surf, (cx, cy), "Gauge:", (100,120,140))
+            bx3 = cx + 110
+            choices = [
+                ('STD', 'Standard'),
+                ('3-FT', 'Narrow'),
+                ('DUAL', 'DualGauge'),
+                ('L', 'DualGauge_L'),
+                ('R', 'DualGauge_R'),
+                ('DUAL T', 'DualGauge_T'),
+            ]
+            current = normalize_track_gauge(
+                getattr(self, 'geo_gauge', 'Standard')
+            )
+            for label3, value3 in choices:
+                bw3 = self.font.get_rect(label3).width + 8
+                r3 = pygame.Rect(bx3, cy - 1, bw3, 16)
+                active3 = current == value3
+                hover3 = r3.collidepoint(mx0, my0)
+                color3 = (
+                    (245, 64, 210)
+                    if value3 == 'DualGauge_T'
+                    else (110, 184, 255)
+                    if value3.startswith('DualGauge')
+                    else (255, 122, 20)
+                    if value3 == 'Narrow'
+                    else (180, 160, 70)
+                )
+                pygame.draw.rect(
+                    surf,
+                    color3 if active3 else (
+                        tuple(v // 2 for v in color3)
+                        if hover3 else (15, 22, 32)
+                    ),
+                    r3,
+                    border_radius=2,
+                )
+                pygame.draw.rect(surf, color3, r3, 1, border_radius=2)
+                self.font.render_to(
+                    surf,
+                    (bx3 + 4, cy),
+                    label3,
+                    (245, 245, 245) if active3 else (140, 160, 180),
+                )
+                self._geo_choice_rects.append((r3, 'geo_gauge', value3))
+                bx3 += bw3 + 3
+            cy += 20
+            if current == 'DualGauge_T':
+                self.font.render_to(
+                    surf,
+                    (cx + 110, cy - 2),
+                    "One short L-to-R shared-rail transition segment only",
+                    (245, 100, 210),
+                )
+                cy += 16
+
         def preview_counts():
             total_nodes = sum(len(entry[0]) for entry in self.geo_preview)
             total_segs = sum(len(entry[1]) for entry in self.geo_preview)
@@ -11679,6 +12566,10 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
 
         def preview_radius_warnings():
             return self._geo_preview_radius_warnings()
+
+        if self.geo_mode in {
+                'pieces', 'curve', 'parallel', 'node', 'turnout', 'wye'}:
+            gauge_row()
 
         if self.geo_mode == 'guide':
             guide_line_h = 16 if geo_compact else 18
@@ -12447,16 +13338,17 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
                 self.font.render_to(surf, (cx, cy), "Chain nodes (top=start, auto-filled path):", (100,120,140))
                 cy += 16
                 row_h4 = 15
-                for i, nid in enumerate(chain[:12]):
+                max_chain_rows = 5 if getattr(self, 'profile_panel', False) else 12
+                for i, nid in enumerate(chain[:max_chain_rows]):
                     node4 = mp.merged_nodes.get(nid, {})
                     y4    = node4.get('y', 0)
                     col4  = (0,200,255) if nid == sel_nid else (160,180,200)
                     self.font.render_to(surf, (cx, cy),
                         f"  {i+1}. {nid}   Y={y4:.2f}", col4)
                     cy += row_h4
-                if len(chain) > 12:
+                if len(chain) > max_chain_rows:
                     self.font.render_to(surf, (cx, cy),
-                        f"  … +{len(chain)-12} more", (100,120,140))
+                        f"  … +{len(chain)-max_chain_rows} more", (100,120,140))
                     cy += row_h4
 
             cy += 6
@@ -12523,6 +13415,129 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
             self.font_big.render_to(surf, (cx + 10, cy + 5), "Apply Grade %",
                 (200, 255, 230) if len(chain) >= 2 else (60, 80, 70))
             self._geo_btn_rects.append((apply_r, 'grade_apply_pct', len(chain) >= 2))
+
+            # Smooth entry/exit grade transitions.
+            cy += 34
+            pygame.draw.line(surf, (70, 48, 90), (cx, cy), (cx + pw - 28, cy))
+            cy += 8
+            self.font_big.render_to(
+                surf, (cx, cy), "Smooth Vertical Transition", (220, 150, 255)
+            )
+            cy += 20
+            self.font.render_to(
+                surf,
+                (cx, cy),
+                "Parabolic entry and exit curves keep grade and pitch continuous.",
+                (120, 130, 155),
+            )
+            cy += 18
+            num_field("Start grade %", 'grade_start_pct', self.grade_start_pct, width=80)
+            num_field("Hold grade %", 'grade_target_pct', self.grade_target_pct, width=80)
+            num_field("End grade %", 'grade_end_pct', self.grade_end_pct, width=80)
+            num_field(
+                "Entry curve m",
+                'grade_transition_in_m',
+                self.grade_transition_in_m,
+                width=80,
+                nudge_step=25.0,
+            )
+            num_field(
+                "Exit curve m",
+                'grade_transition_out_m',
+                self.grade_transition_out_m,
+                width=80,
+                nudge_step=25.0,
+            )
+
+            preview_enabled = len(chain) >= 2
+            read_grade_rect = pygame.Rect(cx, cy, 142, 20)
+            read_grade_hover = (
+                read_grade_rect.collidepoint(mx0, my0) and preview_enabled
+            )
+            pygame.draw.rect(
+                surf,
+                (70, 80, 120) if read_grade_hover else (32, 38, 58),
+                read_grade_rect,
+                border_radius=4,
+            )
+            pygame.draw.rect(
+                surf,
+                (110, 140, 210) if preview_enabled else (48, 52, 62),
+                read_grade_rect,
+                1,
+                border_radius=4,
+            )
+            self.font.render_to(
+                surf,
+                (read_grade_rect.x + 7, read_grade_rect.y + 3),
+                "Read Current Ends",
+                TEXT_COLOR if preview_enabled else (80, 86, 96),
+            )
+            self._geo_btn_rects.append(
+                (
+                    read_grade_rect,
+                    'grade_transition_read_ends',
+                    preview_enabled,
+                )
+            )
+            cy += 26
+
+            bx_grade = cx
+            for label, action, color, enabled in [
+                    ("Preview", "grade_transition_preview", (150, 80, 210), preview_enabled),
+                    ("Apply", "grade_transition_apply", (0, 170, 120), preview_enabled),
+                    (
+                        "Clear Preview",
+                        "grade_transition_clear",
+                        (110, 70, 90),
+                        self.grade_transition_preview_active,
+                    )]:
+                bw_grade = self.font_big.get_rect(label).width + 16
+                rect_grade = pygame.Rect(bx_grade, cy, bw_grade, 24)
+                hover_grade = rect_grade.collidepoint(mx0, my0) and enabled
+                fill_grade = (
+                    color
+                    if hover_grade
+                    else tuple(max(18, component // 2) for component in color)
+                    if enabled
+                    else (24, 26, 32)
+                )
+                pygame.draw.rect(surf, fill_grade, rect_grade, border_radius=4)
+                pygame.draw.rect(
+                    surf,
+                    color if enabled else (48, 52, 62),
+                    rect_grade,
+                    1,
+                    border_radius=4,
+                )
+                self.font_big.render_to(
+                    surf,
+                    (rect_grade.x + 8, rect_grade.y + 5),
+                    label,
+                    TEXT_COLOR if enabled else (80, 86, 96),
+                )
+                self._geo_btn_rects.append((rect_grade, action, enabled))
+                bx_grade = rect_grade.right + 6
+            cy += 30
+
+            if self.grade_transition_preview_active:
+                profile_data = self._build_profile_data()
+                vertical = profile_data.get('vertical_preview') or {}
+                if vertical.get('errors'):
+                    preview_text = "Blocked: " + str(vertical['errors'][0])
+                    preview_color = (255, 110, 100)
+                else:
+                    preview_text = (
+                        f"Preview rise/fall {vertical.get('rise_m', 0.0):+.2f} m; "
+                        f"end Y {vertical.get('end_y', 0.0):.2f} m"
+                    )
+                    preview_color = (205, 160, 255)
+                self.font.render_to(
+                    surf,
+                    (cx, cy),
+                    self._fit_text_to_width(self.font, preview_text, pw - 28),
+                    preview_color,
+                )
 
         elif self.geo_mode == 'turnout':
             turnout_errors = preview_errors()
@@ -12712,7 +13727,220 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
                 cy += 18
                 self.font.render_to(surf, (cx, cy), "Blocked: " + str(error), (255, 110, 90))
 
+        geo_content_height = max(
+            0,
+            int(cy + geo_scroll - geo_content_top + 12),
+        )
+        geo_scroll_max = max(
+            0,
+            geo_content_height - geo_content_view.height,
+        )
+        self._geo_scroll_max = geo_scroll_max
+        self._geo_scroll_max_by_mode[self.geo_mode] = geo_scroll_max
+        if geo_scroll > geo_scroll_max:
+            self._geo_scroll_by_mode[self.geo_mode] = geo_scroll_max
+        surf.set_clip(previous_geo_clip)
 
+        if geo_scroll_max > 0:
+            track_rect = pygame.Rect(
+                px + pw - 7,
+                geo_content_view.y,
+                3,
+                geo_content_view.height,
+            )
+            pygame.draw.rect(surf, (35, 42, 54), track_rect, border_radius=2)
+            thumb_h = max(
+                24,
+                int(
+                    geo_content_view.height
+                    * geo_content_view.height
+                    / max(1, geo_content_height)
+                ),
+            )
+            thumb_travel = max(0, geo_content_view.height - thumb_h)
+            thumb_y = geo_content_view.y + int(
+                thumb_travel * geo_scroll / max(1, geo_scroll_max)
+            )
+            pygame.draw.rect(
+                surf,
+                (120, 90, 155),
+                (track_rect.x, thumb_y, track_rect.width, thumb_h),
+                border_radius=2,
+            )
+
+
+    def _grade_chain_nodes(self) -> list[dict]:
+        if not self.mod_project:
+            return []
+        return [
+            self.mod_project.merged_nodes[node_id]
+            for node_id in self.grade_chain
+            if node_id in self.mod_project.merged_nodes
+        ]
+
+    @staticmethod
+    def _grade_pitch_for_node(
+            nodes: list[dict], index: int, grade_pct: float) -> float:
+        """Convert chain-direction grade to the node's local rotX sign."""
+        node = nodes[index]
+        if len(nodes) < 2:
+            return float(node.get('rotX', 0.0))
+        if index <= 0:
+            left = node
+            right = nodes[1]
+        elif index >= len(nodes) - 1:
+            left = nodes[index - 1]
+            right = node
+        else:
+            left = nodes[index - 1]
+            right = nodes[index + 1]
+        dx = float(right.get('x', 0.0)) - float(left.get('x', 0.0))
+        dz = float(right.get('z', 0.0)) - float(left.get('z', 0.0))
+        length = math.hypot(dx, dz)
+        if length < 0.001:
+            return float(node.get('rotX', 0.0))
+        tx = dx / length
+        tz = dz / length
+        rot_y = math.radians(float(node.get('rotY', 0.0)))
+        forward_x = math.sin(rot_y)
+        forward_z = math.cos(rot_y)
+        orientation = 1.0 if forward_x * tx + forward_z * tz >= 0.0 else -1.0
+        local_grade = float(grade_pct) / 100.0 * orientation
+        return -math.degrees(math.atan(local_grade))
+
+    @staticmethod
+    def _grades_for_node_elevations(
+            nodes: list[dict], y_by_id: dict[str, float]) -> dict[str, float]:
+        """Estimate the tangent grade at every node from a proposed profile."""
+        grades = {}
+        if len(nodes) < 2:
+            return grades
+        for index, node in enumerate(nodes):
+            if index == 0:
+                left_index, right_index = 0, 1
+            elif index == len(nodes) - 1:
+                left_index, right_index = index - 1, index
+            else:
+                left_index, right_index = index - 1, index + 1
+            left = nodes[left_index]
+            right = nodes[right_index]
+            run = math.hypot(
+                float(right.get('x', 0.0)) - float(left.get('x', 0.0)),
+                float(right.get('z', 0.0)) - float(left.get('z', 0.0)),
+            )
+            left_y = float(y_by_id.get(str(left.get('id')), left.get('y', 0.0)))
+            right_y = float(y_by_id.get(str(right.get('id')), right.get('y', 0.0)))
+            grades[str(node.get('id'))] = (
+                (right_y - left_y) / run * 100.0 if run > 0.001 else 0.0
+            )
+        return grades
+
+    def _write_grade_profile(
+            self,
+            graph,
+            nodes: list[dict],
+            y_by_id: dict[str, float],
+            grade_by_id: dict[str, float]):
+        for index, node in enumerate(nodes):
+            node_id = str(node.get('id'))
+            if node_id not in y_by_id:
+                continue
+            grade_pct = float(grade_by_id.get(node_id, 0.0))
+            rot_x = self._grade_pitch_for_node(nodes, index, grade_pct)
+            graph.set_node(
+                node_id,
+                float(node.get('x', 0.0)),
+                float(y_by_id[node_id]),
+                float(node.get('z', 0.0)),
+                rot_x,
+                float(node.get('rotY', 0.0)),
+                float(node.get('rotZ', 0.0)),
+                bool(node.get('flipSwitchStand', False)),
+            )
+
+    def _set_grade_transition_preview(self, enabled: bool):
+        self.grade_transition_preview_active = bool(enabled)
+        self._profile_cache_key = None
+        self._profile_cache_data = None
+        if not enabled:
+            return
+        if len(self.grade_chain) < 2:
+            self.grade_transition_preview_active = False
+            self._set_status("Vertical curve preview needs a Grade chain")
+            return
+        self.profile_panel = True
+        data = self._build_profile_data()
+        preview = data.get('vertical_preview') or {}
+        errors = list(preview.get('errors', []))
+        if errors:
+            self._set_status(f"Vertical curve blocked: {errors[0]}")
+            return
+        self._set_status(
+            f"Vertical curve preview: {preview.get('total_length_m', 0.0):.1f} m, "
+            f"rise/fall {preview.get('rise_m', 0.0):+.2f} m"
+        )
+
+    def _seed_grade_transition_from_chain(self):
+        was_active = self.grade_transition_preview_active
+        self.grade_transition_preview_active = False
+        self._profile_cache_key = None
+        self._profile_cache_data = None
+        data = self._build_profile_data()
+        grade_labels = list(data.get('grade_labels', []))
+        if not grade_labels:
+            self.grade_transition_preview_active = was_active
+            self._set_status("Current chain has no measurable end grades")
+            return
+        self.grade_start_pct = float(grade_labels[0].get('grade_pct', 0.0))
+        self.grade_end_pct = float(grade_labels[-1].get('grade_pct', 0.0))
+        self.grade_transition_preview_active = was_active
+        self._profile_cache_key = None
+        self._profile_cache_data = None
+        self._set_status(
+            f"Read end grades: start {self.grade_start_pct:+.2f}%, "
+            f"end {self.grade_end_pct:+.2f}%"
+        )
+
+    def _commit_grade_transition(self):
+        if len(self.grade_chain) < 2 or not self.mod_project:
+            self._set_status("Vertical curve needs a Grade chain")
+            return
+        if not self.grade_transition_preview_active:
+            self._set_grade_transition_preview(True)
+        data = self._build_profile_data()
+        preview = data.get('vertical_preview') or {}
+        errors = list(preview.get('errors', []))
+        if errors:
+            self._set_status(f"Vertical curve blocked: {errors[0]}")
+            return
+        graph = self.mod_project.get_graph_layer()
+        nodes = self._grade_chain_nodes()
+        node_points = list(preview.get('node_points', []))
+        if not graph or len(nodes) < 2 or len(node_points) != len(nodes):
+            self._set_status("Vertical curve chain changed; preview it again")
+            return
+
+        y_by_id = {
+            str(point.get('node_id')): float(point.get('y', 0.0))
+            for point in node_points
+        }
+        grade_by_id = {
+            str(point.get('node_id')): float(point.get('grade_pct', 0.0))
+            for point in node_points
+        }
+        self._push_undo(f"vertical curve {len(nodes)} nodes")
+        self._write_grade_profile(graph, nodes, y_by_id, grade_by_id)
+        self._commit_mod_layer_edit(graph, graph_changed=True)
+        self.grade_transition_preview_active = False
+        self._profile_cache_key = None
+        self._profile_cache_data = None
+        self._set_status(
+            f"Vertical curve applied to {len(nodes)} nodes: "
+            f"{self.grade_start_pct:+.2f}% -> {self.grade_target_pct:+.2f}% "
+            f"-> {self.grade_end_pct:+.2f}%"
+        )
+
+    def _commit_grade_smooth(self):
         """Apply grade smoothing to the built chain."""
         if len(self.grade_chain) < 2 or not self.mod_project:
             return
@@ -12729,17 +13957,12 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
         results = smooth_grade(nodes_ordered,
                                fix_first=self.grade_fix_first,
                                fix_last=self.grade_fix_last)
-        for nid, new_y in results:
-            node = dict(self.mod_project.merged_nodes.get(nid, {}))
-            if node:
-                graph.set_node(nid, node['x'], new_y, node['z'],
-                               node.get('rotX', 0), node.get('rotY', 0),
-                               node.get('rotZ', 0), node.get('flipSwitchStand', False))
-
-        self.mod_project._rebuild_merge()
-        self._mark_measure_cache_dirty()
-        graph.save()
-        if self.bridge: self.bridge.reload_tracks(str(graph.path))
+        y_by_id = {str(node_id): float(new_y) for node_id, new_y in results}
+        grade_by_id = self._grades_for_node_elevations(nodes_ordered, y_by_id)
+        self._write_grade_profile(
+            graph, nodes_ordered, y_by_id, grade_by_id
+        )
+        self._commit_mod_layer_edit(graph, graph_changed=True)
         y_vals = [y for _, y in results]
         self._set_status(
             f"Grade smoothed: {len(results)} nodes  "
@@ -12763,17 +13986,15 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
         results = apply_grade_from_start(nodes_ordered,
                                          grade_pct=self.grade_target_pct,
                                          fix_first=True)
-        for nid, new_y in results:
-            node = dict(self.mod_project.merged_nodes.get(nid, {}))
-            if node:
-                graph.set_node(nid, node['x'], new_y, node['z'],
-                               node.get('rotX', 0), node.get('rotY', 0),
-                               node.get('rotZ', 0), node.get('flipSwitchStand', False))
-
-        self.mod_project._rebuild_merge()
-        self._mark_measure_cache_dirty()
-        graph.save()
-        if self.bridge: self.bridge.reload_tracks(str(graph.path))
+        y_by_id = {str(node_id): float(new_y) for node_id, new_y in results}
+        grade_by_id = {
+            str(node.get('id')): float(self.grade_target_pct)
+            for node in nodes_ordered
+        }
+        self._write_grade_profile(
+            graph, nodes_ordered, y_by_id, grade_by_id
+        )
+        self._commit_mod_layer_edit(graph, graph_changed=True)
         y_vals = [y for _, y in results]
         import math as _math
         # Compute actual chain length for the status message
@@ -12812,10 +14033,7 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
                                node.get('rotX', 0), node.get('rotY', 0),
                                node.get('rotZ', 0), node.get('flipSwitchStand', False))
 
-        self.mod_project._rebuild_merge()
-        self._mark_measure_cache_dirty()
-        graph.save()
-        if self.bridge: self.bridge.reload_tracks(str(graph.path))
+        self._commit_mod_layer_edit(graph, graph_changed=True)
         self._set_status(
             f"Straightened {len(results)} nodes between "
             f"({nodes_ordered[0]['x']:.1f}, {nodes_ordered[0]['z']:.1f}) → "
@@ -12838,7 +14056,8 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
         entry_segs   = [s for s in conn_segs if s.get('endId')   == sw_id]
         forward_segs = [s for s in conn_segs if s.get('startId') == sw_id]
 
-        approach_rotY = sw.get('rotY', 0)
+        approach_rotY = float(sw.get('rotY', 0))
+        existing_approach = bool(entry_segs or forward_segs)
         if entry_segs:
             n0 = self.mod_project.merged_nodes.get(entry_segs[0]['startId'])
             if n0:
@@ -12846,18 +14065,57 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
         elif forward_segs:
             n1 = self.mod_project.merged_nodes.get(forward_segs[0]['endId'])
             if n1:
-                approach_rotY = (self._bezier_tangent_rotY(sw, n1, t=0.0) + 180) % 360
+                # A wye has no straight-through route. Treat a sole segment
+                # leaving the selected endpoint as the approach behind the
+                # frog, so the generated left/right legs replace neither it
+                # nor create a fourth connection.
+                approach_rotY = (
+                    self._bezier_tangent_rotY(sw, n1, t=0.0) + 180.0
+                ) % 360.0
 
         errors = []
         leg = float(self.wye_leg_length)
         la  = float(self.wye_left_angle)
         ra  = float(self.wye_right_angle)
+        if len(conn_segs) > 1:
+            errors.append("Wye needs an endpoint with zero or one existing route")
         if leg < 10.0:
             errors.append(f"Leg {leg:.1f} m is very short")
         if la < 1.0 or ra < 1.0:
             errors.append("Angles must be at least 1°")
         if la + ra > 60.0:
             errors.append("Combined spread > 60° is unusually wide")
+        left_radius = turnout_radius_for_chord(leg, la)
+        right_radius = turnout_radius_for_chord(leg, ra)
+        if (
+            left_radius is None
+            or left_radius < float(self.alignment_min_radius_m)
+        ):
+            errors.append(
+                f"Left radius is under {self.alignment_min_radius_m:.0f} m"
+            )
+        if (
+            right_radius is None
+            or right_radius < float(self.alignment_min_radius_m)
+        ):
+            errors.append(
+                f"Right radius is under {self.alignment_min_radius_m:.0f} m"
+            )
+
+        if forward_segs and not entry_segs:
+            n1 = self.mod_project.merged_nodes.get(forward_segs[0]['endId'])
+            run = math.hypot(
+                float(sw.get('x', 0.0)) - float(n1.get('x', 0.0)),
+                float(sw.get('z', 0.0)) - float(n1.get('z', 0.0)),
+            ) if n1 else 0.0
+            grade_pct = (
+                (float(sw.get('y', 0.0)) - float(n1.get('y', 0.0)))
+                / run * 100.0
+            ) if n1 and run > 0.01 else 0.0
+        else:
+            grade_pct = self._turnout_approach_grade_pct(
+                sw, approach_rotY, entry_segs, [],
+            )
 
         t_nodes, t_segs, sw_id_new, ent_id, left_id, rgt_id = generate_wye(
             float(sw['x']), float(sw['y']), float(sw['z']),
@@ -12869,6 +14127,7 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
             track_class=self.wye_track_class,
             style=self.wye_style,
             speed_limit=int(self.wye_speed),
+            grade_pct=grade_pct,
             id_prefix=f'N{pid}W',
             seg_prefix=f'S{pid}W',
             existing_ids=existing,
@@ -12876,7 +14135,7 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
 
         # Separate new nodes from the frog update
         nodes_out = [n for n in t_nodes if n['id'] != sw_id_new and
-                     not (n['id'] == ent_id and entry_segs)]
+                     not (n['id'] == ent_id and existing_approach)]
         sw_update = next(n for n in t_nodes if n['id'] == sw_id_new)
         sw_update = dict(sw_update)
         sw_update['id'] = sw_id  # keep original frog id
@@ -12884,7 +14143,7 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
         # Remap sw_id_new -> sw_id in all segments, drop entry seg if already exists
         segs_out = []
         for s in t_segs:
-            if s['startId'] == ent_id and entry_segs:
+            if s['startId'] == ent_id and existing_approach:
                 continue  # entry leg already exists
             s = dict(s)
             if s['startId'] == sw_id_new:
@@ -12898,6 +14157,9 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
             'mode':   'wye',
             'errors': errors,
             'warnings': [],
+            'approach_grade_pct': grade_pct,
+            'left_radius_m': left_radius,
+            'right_radius_m': right_radius,
         }
         if errors:
             self._set_status("Wye preview: " + errors[0])
@@ -12959,7 +14221,7 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
                 # Forward segment: heading at frog vs heading at midpoint
                 h_start = self._bezier_tangent_rotY(sw, n1, t=0.0)
                 h_mid   = self._bezier_tangent_rotY(sw, n1, t=0.5)
-                approach_rotY = (h_start + 180) % 360
+                approach_rotY = h_start
                 delta  = ((h_mid - h_start + 180) % 360) - 180
                 try:
                     p0, p1, p2, p3 = _bezier_control_points(sw, n1)
@@ -12972,21 +14234,32 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
 
 
         # Use auto_through_curve when through_curve_angle is 0 (user hasn't overridden)
-        effective_through_curve = (auto_through_curve
-                                   if float(self.turnout_through_curve) == 0.0
-                                   else float(self.turnout_through_curve))
+        use_auto_through_curve = float(self.turnout_through_curve) == 0.0
+        effective_through_curve = (
+            auto_through_curve
+            if use_auto_through_curve else
+            float(self.turnout_through_curve)
+        )
 
         sign      = 1.0 if self.turnout_direction == 'right' else -1.0
         leg       = float(self.turnout_leg_length)
-        div_rotY  = (approach_rotY + sign * float(self.turnout_diverge_angle)) % 360
-        thru_rotY = (approach_rotY + sign * effective_through_curve) % 360
+        div_deflection = sign * float(self.turnout_diverge_angle)
+        thru_deflection = (
+            auto_through_curve
+            if use_auto_through_curve else
+            sign * effective_through_curve
+        )
+        grade_pct = self._turnout_approach_grade_pct(
+            sw, approach_rotY, entry_segs, forward_segs,
+        )
 
-        def place(rotY):
-            r = math.radians(rotY)
-            x2 = sw['x'] + leg * math.sin(r)
-            z2 = sw['z'] + leg * math.cos(r)
-            y2 = self._sample_terrain_y(x2, z2) or sw['y']
-            return x2, y2, z2
+        def place(deflection, reverse=False):
+            return turnout_leg_pose(
+                float(sw['x']), float(sw['y']), float(sw['z']),
+                approach_rotY, deflection, leg,
+                grade_pct=grade_pct,
+                reverse=reverse,
+            )
 
         ctr = [1]
         def next_nid():
@@ -13003,10 +14276,10 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
 
         # Entry leg — only if no entry segment already exists
         if not entry_segs:
-            ex, ey, ez = place((approach_rotY + 180) % 360)
+            ex, ey, ez, erx, entry_rotY = place(0.0, reverse=True)
             eid = next_nid()
             nodes_out.append({'id': eid, 'x': ex, 'y': ey, 'z': ez,
-                              'rotX': 0, 'rotY': (approach_rotY+180)%360,
+                              'rotX': erx, 'rotY': entry_rotY,
                               'rotZ': 0, 'flipSwitchStand': False})
             segs_out.append({'id': next_sid(), 'startId': eid, 'endId': sw_id,
                              'trackClass': self.turnout_track_class, 'style': 'Standard',
@@ -13015,10 +14288,10 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
 
         # Through leg — only if no forward segs already
         if not forward_segs:
-            tx, ty, tz = place(thru_rotY)
+            tx, ty, tz, trx, thru_rotY = place(thru_deflection)
             tid = next_nid()
             nodes_out.append({'id': tid, 'x': tx, 'y': ty, 'z': tz,
-                              'rotX': 0, 'rotY': thru_rotY,
+                              'rotX': trx, 'rotY': thru_rotY,
                               'rotZ': 0, 'flipSwitchStand': False})
             segs_out.append({'id': next_sid(), 'startId': sw_id, 'endId': tid,
                              'trackClass': self.turnout_track_class, 'style': 'Standard',
@@ -13026,10 +14299,14 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
                              'priority': 0, 'groupId': ''})
 
         # Diverge leg — always new
-        dvx, dvy, dvz = place(div_rotY)
+        if forward_segs:
+            thru_rotY = (approach_rotY + thru_deflection) % 360.0
+            tx = ty = tz = None
+
+        dvx, dvy, dvz, drx, div_rotY = place(div_deflection)
         did = next_nid()
         nodes_out.append({'id': did, 'x': dvx, 'y': dvy, 'z': dvz,
-                          'rotX': 0, 'rotY': div_rotY,
+                          'rotX': drx, 'rotY': div_rotY,
                           'rotZ': 0, 'flipSwitchStand': False})
         segs_out.append({'id': next_sid(), 'startId': sw_id, 'endId': did,
                          'trackClass': self.turnout_div_class, 'style': 'Standard',
@@ -13040,15 +14317,18 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
         # Stored separately so _geo_commit knows not to count it as a new node.
         sw_update = {'id': sw_id,
                      'x': sw['x'], 'y': sw['y'], 'z': sw['z'],
-                     'rotX': 0, 'rotY': approach_rotY,
-                     'rotZ': 0, 'flipSwitchStand': self.turnout_flip}
+                     'rotX': -math.degrees(math.atan(grade_pct / 100.0)),
+                     'rotY': approach_rotY,
+                     'rotZ': sw.get('rotZ', 0),
+                     'flipSwitchStand': self.turnout_flip}
 
-        diverge_radius = self._segment_curve_radius_m_for_nodes(sw_update, {
-            'x': dvx,
-            'y': dvy,
-            'z': dvz,
-            'rotY': div_rotY,
-        })
+        diverge_radius = turnout_radius_for_chord(leg, div_deflection)
+        through_radius = turnout_radius_for_chord(leg, thru_deflection)
+        through_point = (
+            (float(tx), float(tz))
+            if tx is not None and tz is not None else
+            (float(sw['x']), float(sw['z']))
+        )
         self.geo_preview = [(nodes_out, segs_out, [sw_update])]
         self.geo_preview_meta = self._build_turnout_preview_meta(
             conn_segs=conn_segs,
@@ -13058,6 +14338,10 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
             diverge_angle_deg=self.turnout_diverge_angle,
             diverge_radius=diverge_radius,
             diverge_point=(float(dvx), float(dvz)),
+            through_angle_deg=thru_deflection,
+            through_radius=through_radius,
+            through_point=through_point,
+            approach_grade_pct=grade_pct,
         )
         self._set_status(
             f"Turnout: approach={approach_rotY:.1f}°  "
@@ -13190,14 +14474,14 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
                 graph.set_segment(s['id'], s['startId'], s['endId'],
                                   s['trackClass'], s['style'],
                                   s['speedLimit'], s['priority'],
-                                  s.get('groupId',''))
+                                  s.get('groupId',''),
+                                  s.get(
+                                      'gauge',
+                                      getattr(self, 'geo_gauge', 'Standard'),
+                                  ))
                 total_s += 1
 
-        self.mod_project._rebuild_merge()
-        self._mark_measure_cache_dirty()
-        graph.save()
-        if self.bridge:
-            self.bridge.reload_tracks(str(graph.path))
+        self._commit_mod_layer_edit(graph, graph_changed=True)
         self._clear_geo_preview()
         update_text = f"  {total_u} updated" if total_u else ""
         self._set_status(
@@ -13231,6 +14515,10 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
                 return True
 
         # Numeric fields — activate for keyboard input
+        content_view = getattr(self, '_geo_scroll_view_rect', None)
+        if content_view is not None and not content_view.collidepoint(mx, my):
+            return True
+
         for r, key, val in getattr(self, '_geo_field_rects', []):
             if r.collidepoint(mx, my):
                 self._geo_input_focus = key
@@ -13241,7 +14529,13 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
         for r, key, opt in getattr(self, '_geo_choice_rects', []):
             if r.collidepoint(mx, my):
                 setattr(self, key, opt)
-                if not (self.geo_mode == 'pieces' and key in ('geo_piece_type', 'geo_direction', 'geo_track_class', 'geo_style')):
+                if not (
+                    self.geo_mode == 'pieces'
+                    and key in (
+                        'geo_piece_type', 'geo_direction',
+                        'geo_track_class', 'geo_style', 'geo_gauge',
+                    )
+                ):
                     self._clear_geo_preview()
                 return True
 
@@ -13342,10 +14636,12 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
                 elif act == 'grade_remove_last':
                     if self.grade_chain:
                         removed = self.grade_chain.pop()
+                        self._set_grade_transition_preview(False)
                         self._clear_geo_preview()
                         self._set_status(f"Removed {removed}")
                 elif act == 'grade_clear':
                     self.grade_chain = []
+                    self._set_grade_transition_preview(False)
                     self._clear_geo_preview()
                     self._set_status("Grade chain cleared")
                 elif act == 'grade_fix_first':
@@ -13358,6 +14654,15 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
                     self._commit_straighten_xz()
                 elif act == 'grade_apply_pct':
                     self._commit_apply_grade()
+                elif act == 'grade_transition_preview':
+                    self._set_grade_transition_preview(True)
+                elif act == 'grade_transition_read_ends':
+                    self._seed_grade_transition_from_chain()
+                elif act == 'grade_transition_apply':
+                    self._commit_grade_transition()
+                elif act == 'grade_transition_clear':
+                    self._set_grade_transition_preview(False)
+                    self._set_status("Vertical curve preview cleared")
                 elif act == 'wye_flip':
                     self.wye_flip = not self.wye_flip
                     self._clear_geo_preview()
@@ -13397,6 +14702,18 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
         self._geo_input_focus = None
         return True
 
+    def _scroll_geo_panel(self, direction: int) -> bool:
+        if not self.geo_panel:
+            return False
+        current = int(self._geo_scroll_by_mode.get(self.geo_mode, 0))
+        maximum = int(self._geo_scroll_max_by_mode.get(self.geo_mode, 0))
+        updated = max(0, min(maximum, current + int(direction) * 54))
+        self._geo_scroll_by_mode[self.geo_mode] = updated
+        if updated != current:
+            self._geo_input_focus = None
+            self._geo_input_buf = ''
+        return True
+
     def _handle_geo_keydown(self, event):
         """Handle keyboard input for geo panel numeric fields."""
         if not self.geo_panel or not self._geo_input_focus:
@@ -13414,11 +14731,16 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
                     val = max(1, int(val))
                 elif key in ('geo_radius', 'alignment_min_radius_m', 'turnout_leg_length', 'geo_spline_width', 'geo_piece_length'):
                     val = max(0.0, float(val))
+                elif key in ('grade_transition_in_m', 'grade_transition_out_m'):
+                    val = max(0.0, float(val))
                 elif key in ('geo_degrees', 'turnout_diverge_angle'):
                     val = abs(float(val))
                 setattr(self, key, val)
                 if not (self.geo_mode == 'pieces' and key in ('geo_piece_length', 'geo_radius', 'geo_degrees', 'geo_n_segs', 'geo_speed')):
                     self._clear_geo_preview()
+                if key.startswith('grade_'):
+                    self._profile_cache_key = None
+                    self._profile_cache_data = None
             except ValueError:
                 pass
             self._geo_input_focus = None
@@ -14072,7 +15394,17 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
                 line_y += 15
             warning_box_bottom = warning_rect.bottom
 
-        footer_text = "Drag a node vertically here to edit Y only. Bench pins hold target elevations on the current chain."
+        vertical_preview = data.get('vertical_preview') or {}
+        if vertical_preview and not vertical_preview.get('errors'):
+            footer_text = (
+                "Purple = proposed vertical curve; cyan = current track. "
+                "Apply from Geometry > Grade when the profile is correct."
+            )
+        else:
+            footer_text = (
+                "Drag a node vertically here to edit Y only. "
+                "Bench pins hold target elevations on the current chain."
+            )
         footer_lines = self._wrap_text_lines(self.font, footer_text, max(220, w - 28))
         footer_h = 8 + len(footer_lines) * 15
         station_label_h = 18
@@ -14143,6 +15475,57 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
             if len(track_pts) >= 2:
                 pygame.draw.lines(self.screen, (0, 220, 255), False, track_pts, 3)
 
+        if vertical_preview and not vertical_preview.get('errors'):
+            preview_pts = [
+                (
+                    station_to_x(point.get('relative_station_m', 0.0)),
+                    elev_to_y(point.get('y', 0.0)),
+                )
+                for point in vertical_preview.get('dense_points', [])
+            ]
+            if len(preview_pts) >= 2:
+                pygame.draw.lines(
+                    self.screen, (210, 120, 255), False, preview_pts, 3
+                )
+
+            boundaries = [
+                (
+                    vertical_preview.get('transition_in_end_m'),
+                    "entry end",
+                ),
+                (
+                    vertical_preview.get('transition_out_start_m'),
+                    "exit start",
+                ),
+            ]
+            for station_m, label in boundaries:
+                if station_m is None:
+                    continue
+                boundary_x = station_to_x(float(station_m))
+                for dash_y in range(plot_rect.y, plot_rect.bottom, 8):
+                    pygame.draw.line(
+                        self.screen,
+                        (150, 90, 190),
+                        (boundary_x, dash_y),
+                        (boundary_x, min(plot_rect.bottom, dash_y + 4)),
+                        1,
+                    )
+                self.font.render_to(
+                    self.screen,
+                    (boundary_x + 4, plot_rect.bottom - 16),
+                    label,
+                    (180, 125, 215),
+                )
+
+            for point in vertical_preview.get('node_points', []):
+                point_x = station_to_x(
+                    point.get('relative_station_m', 0.0)
+                )
+                point_y = elev_to_y(point.get('y', 0.0))
+                pygame.draw.circle(
+                    self.screen, (210, 120, 255), (point_x, point_y), 5, 1
+                )
+
         last_label_x = -9999
         for grade in data.get('grade_labels', []):
             gx = station_to_x(grade.get('station_m', 0.0))
@@ -14183,6 +15566,19 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
                 f"trk {float(hover_sample.get('track_y', 0.0)):.1f} m  "
                 f"ter {float(hover_sample.get('terrain_y', 0.0)):.1f} m"
             )
+            preview_samples = list(vertical_preview.get('dense_points', []))
+            if preview_samples and not vertical_preview.get('errors'):
+                preview_hover = min(
+                    preview_samples,
+                    key=lambda point: abs(
+                        float(point.get('relative_station_m', 0.0))
+                        - target_station
+                    ),
+                )
+                tip += (
+                    f"  proposed {float(preview_hover.get('y', 0.0)):.1f} m"
+                    f" @ {float(preview_hover.get('grade_pct', 0.0)):+.2f}%"
+                )
             self.font.render_to(
                 self.screen,
                 (plot_rect.x + 10, plot_rect.y + 8),
