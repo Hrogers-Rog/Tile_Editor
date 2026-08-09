@@ -1,0 +1,12 @@
+C:\Hrogers_Railroader_mods_Projects\Tile_Editor\CrossingRuntime\bin\Release\net48\Info.json
+C:\Hrogers_Railroader_mods_Projects\Tile_Editor\CrossingRuntime\bin\Release\net48\README.md
+C:\Hrogers_Railroader_mods_Projects\Tile_Editor\CrossingRuntime\bin\Release\net48\Hrogers.CrossingRuntime.dll
+C:\Hrogers_Railroader_mods_Projects\Tile_Editor\CrossingRuntime\bin\Release\net48\Hrogers.CrossingRuntime.pdb
+C:\Hrogers_Railroader_mods_Projects\Tile_Editor\CrossingRuntime\obj\Release\net48\Hrogers.CrossingRuntime.csproj.AssemblyReference.cache
+C:\Hrogers_Railroader_mods_Projects\Tile_Editor\CrossingRuntime\obj\Release\net48\Hrogers.CrossingRuntime.GeneratedMSBuildEditorConfig.editorconfig
+C:\Hrogers_Railroader_mods_Projects\Tile_Editor\CrossingRuntime\obj\Release\net48\Hrogers.CrossingRuntime.AssemblyInfoInputs.cache
+C:\Hrogers_Railroader_mods_Projects\Tile_Editor\CrossingRuntime\obj\Release\net48\Hrogers.CrossingRuntime.AssemblyInfo.cs
+C:\Hrogers_Railroader_mods_Projects\Tile_Editor\CrossingRuntime\obj\Release\net48\Hrogers.CrossingRuntime.csproj.CoreCompileInputs.cache
+C:\Hrogers_Railroader_mods_Projects\Tile_Editor\CrossingRuntime\obj\Release\net48\Hrogers.CrossingRuntime.sourcelink.json
+C:\Hrogers_Railroader_mods_Projects\Tile_Editor\CrossingRuntime\obj\Release\net48\Hrogers.CrossingRuntime.dll
+C:\Hrogers_Railroader_mods_Projects\Tile_Editor\CrossingRuntime\obj\Release\net48\Hrogers.CrossingRuntime.pdb

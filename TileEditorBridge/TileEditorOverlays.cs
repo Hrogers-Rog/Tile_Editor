@@ -64,7 +64,8 @@ namespace Hrogers.TileEditorBridge
 
         public void Activate(PickableActivateEvent evt)
         {
-            if (_session != null
+            if (!TileEditorCameraInput.EditorWorldInputBlocked
+                && _session != null
                 && _node != null
                 && evt.Activation == PickableActivation.Primary)
             {
@@ -260,7 +261,9 @@ namespace Hrogers.TileEditorBridge
 
         public void Activate(PickableActivateEvent evt)
         {
-            if (_session != null && _segment != null)
+            if (!TileEditorCameraInput.EditorWorldInputBlocked
+                && _session != null
+                && _segment != null)
                 _session.SelectSegment(_segment);
         }
 

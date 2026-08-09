@@ -1,8 +1,8 @@
+C:\Hrogers_Railroader_mods_Projects\Tile_Editor\TileEditorBridge\bin\Release\net48\Info.json
+C:\Hrogers_Railroader_mods_Projects\Tile_Editor\TileEditorBridge\bin\Release\net48\Hrogers.TileEditorBridge.dll
 C:\Hrogers_Railroader_mods_Projects\Tile_Editor\TileEditorBridge\obj\Release\net48\Hrogers.TileEditorBridge.csproj.AssemblyReference.cache
 C:\Hrogers_Railroader_mods_Projects\Tile_Editor\TileEditorBridge\obj\Release\net48\Hrogers.TileEditorBridge.GeneratedMSBuildEditorConfig.editorconfig
 C:\Hrogers_Railroader_mods_Projects\Tile_Editor\TileEditorBridge\obj\Release\net48\Hrogers.TileEditorBridge.AssemblyInfoInputs.cache
 C:\Hrogers_Railroader_mods_Projects\Tile_Editor\TileEditorBridge\obj\Release\net48\Hrogers.TileEditorBridge.AssemblyInfo.cs
 C:\Hrogers_Railroader_mods_Projects\Tile_Editor\TileEditorBridge\obj\Release\net48\Hrogers.TileEditorBridge.csproj.CoreCompileInputs.cache
-C:\Hrogers_Railroader_mods_Projects\Tile_Editor\TileEditorBridge\bin\Release\net48\Info.json
-C:\Hrogers_Railroader_mods_Projects\Tile_Editor\TileEditorBridge\bin\Release\net48\Hrogers.TileEditorBridge.dll
 C:\Hrogers_Railroader_mods_Projects\Tile_Editor\TileEditorBridge\obj\Release\net48\Hrogers.TileEditorBridge.dll

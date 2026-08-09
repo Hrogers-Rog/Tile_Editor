@@ -37,6 +37,7 @@ namespace Hrogers.TileEditorBridge
             internal bool HasWidth;
             internal string HeadStyle = string.Empty;
             internal string TailStyle = string.Empty;
+            internal bool IsLiveMapSource;
         }
 
         private sealed class SplineSource
@@ -50,6 +51,7 @@ namespace Hrogers.TileEditorBridge
             internal RiverPath LivePath;
             internal TrestleComponent LiveTrestle;
             internal bool BuiltWithFuse;
+            internal bool IsLiveMapSource;
         }
 
         private sealed class SplineEditRecord
@@ -79,6 +81,10 @@ namespace Hrogers.TileEditorBridge
             new Stack<SplineEditRecord>();
         private readonly Dictionary<string, object> _splineBuilders =
             new Dictionary<string, object>(StringComparer.Ordinal);
+        private static readonly FieldInfo RiverBuilderProfileField =
+            typeof(RiverBuilder).GetField(
+                "splineProfile",
+                BindingFlags.Instance | BindingFlags.NonPublic);
         private SplineSource _selectedSplineSource;
         private int _selectedSplinePoint = -1;
         private bool _splineyMode;
@@ -132,6 +138,7 @@ namespace Hrogers.TileEditorBridge
                     TailStyle = trestle == null
                         ? ReadEntryString(source.Entry, "tailStyle", "Block")
                         : trestle.tailStyle.ToString(),
+                    IsLiveMapSource = source.IsLiveMapSource,
                 };
             }
         }
@@ -175,6 +182,12 @@ namespace Hrogers.TileEditorBridge
                 _editModeActive
                 && _geoWorkspaceActive
                 && (!_splineyMode || _splineTrackPickMode));
+        }
+
+        internal void BeginTrackBridgePicking()
+        {
+            ClearTrackSelection();
+            SetSplineTrackPickMode(true);
         }
 
         internal void RefreshSplineySources()
@@ -250,18 +263,28 @@ namespace Hrogers.TileEditorBridge
                 RefreshSplinePointOverlays(previous);
         }
 
-        internal void MoveSelectedSplinePoint(Vector3 offset)
+        internal void MoveSelectedSplinePoint(
+            Vector3 offset,
+            bool localAxes)
         {
             ValidateVector(offset, "spline movement offset");
             EditSelectedSplinePoint(
                 source =>
                 {
+                    var appliedOffset = localAxes
+                        ? Quaternion.Euler(
+                            0f,
+                            SplinePointRotation(
+                                source,
+                                _selectedSplinePoint).y,
+                            0f) * offset
+                        : offset;
                     if (source.LivePath != null)
                     {
                         var point = source.LivePath.points[_selectedSplinePoint];
                         point.position += SplineVectorToLocal(
                             source.LivePath.transform,
-                            offset);
+                            appliedOffset);
                         source.LivePath.points[_selectedSplinePoint] = point;
                     }
                     else
@@ -270,7 +293,7 @@ namespace Hrogers.TileEditorBridge
                             source.LiveTrestle.controlPoints[_selectedSplinePoint];
                         point.position += SplineVectorToLocal(
                             source.LiveTrestle.transform,
-                            offset);
+                            appliedOffset);
                     }
                 });
         }
@@ -561,7 +584,6 @@ namespace Hrogers.TileEditorBridge
         internal string CreateTrestleFromSelectedSegment(
             string requestedId,
             float belowRail,
-            float pointSpacing,
             string headStyle,
             string tailStyle)
         {
@@ -574,9 +596,6 @@ namespace Hrogers.TileEditorBridge
             if (belowRail < 0f || belowRail > 10f)
                 throw new InvalidOperationException(
                     "Below-rail offset must be between 0 and 10 m.");
-            if (pointSpacing < 1f || pointSpacing > 50f)
-                throw new InvalidOperationException(
-                    "Bridge point spacing must be between 1 and 50 m.");
             if (!Enum.TryParse(headStyle, true,
                     out TrestleComponent.EndStyle _)
                 || !Enum.TryParse(tailStyle, true,
@@ -590,14 +609,14 @@ namespace Hrogers.TileEditorBridge
             if (length < 2f)
                 throw new InvalidOperationException(
                     "The selected track segment is too short for a bridge.");
-            var sampleCount = Mathf.Clamp(
-                Mathf.CeilToInt(length / pointSpacing) + 1,
-                2,
-                257);
             var points = new JArray();
-            for (var index = 0; index < sampleCount; index++)
+            for (var index = 0; index < 2; index++)
             {
-                var distance = length * index / (sampleCount - 1f);
+                // A TrackSegment is one Bezier span between its A and B
+                // graph nodes. AutoTrestle uses the same endpoint/tangent
+                // representation, so extra distance samples only create
+                // redundant controls and can kink an otherwise smooth span.
+                var distance = index == 0 ? 0f : length;
                 segment.GetPositionRotationAtDistance(
                     distance,
                     TrackSegment.End.A,
@@ -624,7 +643,10 @@ namespace Hrogers.TileEditorBridge
                 id,
                 SplineKind.Trestle,
                 entry);
-            SetSplineTrackPickMode(false);
+            // Stay in bridge-building flow: deselect the newly created
+            // control point, clear the consumed track segment, restore the
+            // yellow overlays, and wait for the next track click.
+            BeginTrackBridgePicking();
             return created;
         }
 
@@ -632,6 +654,13 @@ namespace Hrogers.TileEditorBridge
         {
             RequireGraphEditOwnership();
             var source = RequireSplinePoint();
+            if (source.IsLiveMapSource)
+            {
+                throw new InvalidOperationException(
+                    "Base-map roads and rivers cannot be deleted from an "
+                    + "add-on graph. Move or reshape their points to create "
+                    + "an override.");
+            }
             SyncSplineSourceDocument(source);
             var edit = new SplineEditRecord
             {
@@ -739,6 +768,7 @@ namespace Hrogers.TileEditorBridge
                                      "yyyyMMdd-HHmmss",
                                      CultureInfo.InvariantCulture);
                     File.Copy(path, backup, false);
+                    TileEditorBackupRetention.PruneFor(path);
                     _splineBackups[path] = backup;
                 }
                 var temp = path + ".tile-editor.tmp";
@@ -846,6 +876,9 @@ namespace Hrogers.TileEditorBridge
                 Source = source,
                 Before = (JObject)source.Entry.DeepClone(),
                 BeforeIndex = _selectedSplinePoint,
+                BeforeExists =
+                    source.Document?["splineys"]?[source.Id]
+                    is JObject,
             };
             mutation(source);
             UpdateSplineSourceFromLive(source);
@@ -868,6 +901,29 @@ namespace Hrogers.TileEditorBridge
 
             if (!exists)
             {
+                if (source.IsLiveMapSource
+                    && LiveSplineTransform(source) != null
+                    && entry != null)
+                {
+                    source.Entry = (JObject)entry.DeepClone();
+                    source.Handler =
+                        (string)source.Entry["handler"]
+                        ?? source.Handler;
+                    source.Kind = KindFromEntry(source.Entry);
+                    splineys.Remove(source.Id);
+                    ApplySplineSourceToLive(source);
+                    _splineSources[source.Id] = source;
+                    _selectedSplineSource = source;
+                    _selectedSplinePoint = Mathf.Clamp(
+                        pointIndex,
+                        0,
+                        Mathf.Max(
+                            0,
+                            SplinePointCount(source) - 1));
+                    RebuildLiveSpline(source);
+                    _dirtySplineFiles.Add(source.FilePath);
+                    return;
+                }
                 splineys.Remove(source.Id);
                 DestroyLiveSpline(source);
                 _splineSources.Remove(source.Id);
@@ -1072,7 +1128,10 @@ namespace Hrogers.TileEditorBridge
         private void AttachLiveSplinePaths()
         {
             var livePaths = UnityEngine.Object.FindObjectsOfType<RiverPath>()
-                .Where(path => path != null && path.gameObject.scene.IsValid())
+                .Where(path => path != null
+                               && path.gameObject.scene.IsValid()
+                               && !string.IsNullOrWhiteSpace(
+                                   path.gameObject.name))
                 .GroupBy(path => path.gameObject.name)
                 .ToDictionary(
                     group => group.Key,
@@ -1110,6 +1169,86 @@ namespace Hrogers.TileEditorBridge
                     source.LivePath = path;
                 }
             }
+
+            // Base-game roads and rivers exist as live RiverPath objects but
+            // are not present in the selected mod's JSON. Register them as
+            // live-only sources so their real control points are clickable.
+            // The first edit writes a same-ID override into the selected
+            // graph; discovery itself never dirties the document.
+            foreach (var pair in livePaths)
+            {
+                if (_splineSources.ContainsKey(pair.Key)
+                    || pair.Value?.points == null
+                    || pair.Value.points.Count < 2)
+                {
+                    continue;
+                }
+                var path = pair.Value;
+                _splineSources[pair.Key] = new SplineSource
+                {
+                    Id = pair.Key,
+                    FilePath = _graphPath,
+                    Document = _document,
+                    Entry = CaptureLivePathEntry(path),
+                    Handler = "StrangeCustoms.FlowyThingBuilder",
+                    Kind = path.style == RiverPath.RiverPathStyle.River
+                        ? SplineKind.River
+                        : SplineKind.Road,
+                    LivePath = path,
+                    IsLiveMapSource = true,
+                };
+            }
+        }
+
+        private static JObject CaptureLivePathEntry(RiverPath path)
+        {
+            var kind =
+                path.style == RiverPath.RiverPathStyle.River
+                    ? SplineKind.River
+                    : SplineKind.Road;
+            var points = new JArray();
+            foreach (var point in path.points)
+            {
+                points.Add(
+                    SplinePointToken(
+                        SplinePointToGame(
+                            path.transform,
+                            point.position),
+                        SplineRotationToGame(
+                            path.transform,
+                            point.eulerAngles),
+                        point.width));
+            }
+            return new JObject
+            {
+                ["handler"] = "StrangeCustoms.FlowyThingBuilder",
+                ["profile"] = LivePathProfile(path, kind),
+                ["style"] = kind.ToString(),
+                ["offsetY"] = path.yOffset,
+                ["points"] = points,
+            };
+        }
+
+        private static string LivePathProfile(
+            RiverPath path,
+            SplineKind kind)
+        {
+            var builder = path == null
+                ? null
+                : path.GetComponent<RiverBuilder>();
+            var profile =
+                builder == null
+                    ? null
+                    : RiverBuilderProfileField?.GetValue(builder)
+                      as UnityEngine.Object;
+            if (profile != null
+                && !string.IsNullOrWhiteSpace(profile.name))
+            {
+                return profile.name;
+            }
+            return kind == SplineKind.River
+                ? "R2_Profile_River_Mountain"
+                : "Railroader Paved Road";
         }
 
         private void RebuildSplineyOverlays(bool rebuildExisting)
@@ -1188,6 +1327,11 @@ namespace Hrogers.TileEditorBridge
         {
             if (source?.LivePath != null)
             {
+                // RiverPath owns the height, roadbed, dirt, object, water,
+                // and vegetation-mask modifiers. Rebuild removes the old
+                // curve bounds, registers the adjusted curves, and causes
+                // MapManager to invalidate only the affected terrain tiles.
+                source.LivePath.Rebuild();
                 var builder = source.LivePath.GetComponent<RiverBuilder>();
                 if (builder != null)
                 {
@@ -2004,7 +2148,8 @@ namespace Hrogers.TileEditorBridge
 
         public void Activate(PickableActivateEvent evt)
         {
-            _session?.SelectSplinePoint(_splineId, _pointIndex);
+            if (!TileEditorCameraInput.EditorWorldInputBlocked)
+                _session?.SelectSplinePoint(_splineId, _pointIndex);
         }
 
         public void Deactivate()

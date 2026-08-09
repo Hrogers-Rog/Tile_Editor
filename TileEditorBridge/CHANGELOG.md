@@ -1,5 +1,261 @@
 # Changelog
 
+## 0.25.0
+
+- Adds a hold-to-view **Shift+? Track Survey** HUD. The pointer readout shows
+  stable map/game coordinates, floating Unity world coordinates, graph-local
+  and terrain-tile-local coordinates, the real loaded tile ID, and nearby
+  track segment details including signed grade, heading, chainage, gauge,
+  class, and group.
+- Separates editor input protection from camera navigation. Opening F9 leaves
+  Railroader's normal mouse camera available; middle mouse toggles an
+  editing-safe camera lock. Locked mode retains native W/A/S/D movement and
+  speed modifiers, wheel zoom, and Q/E rotation while suppressing mouse pan
+  and orbit. The header always shows the current camera state and can also be
+  clicked to toggle it.
+
+## 0.24.0
+
+- Adds one-time **Snap to Track** and persistent **Snap + Lock** controls for
+  semaphore placement. Pointer placement can snap to the clicked or nearest
+  Bezier segment with configurable left/right, lateral, and vertical offsets.
+- Saves locked masts using a segment ID, Bezier parameter, and local transform
+  offsets. Locked signals follow subsequent curve, grade, and elevation edits
+  in F9 and during normal gameplay through Signal Runtime 1.7.0. Existing
+  signals can be snapped, locked in place without snapping, or unlocked while
+  retaining their current world transform. Generated diamond signals are
+  track-locked automatically.
+- Makes the existing OBJECTS behavior explicit for Railroader's original
+  signs. Selected base-game signs receive a prominent visible/hidden toggle;
+  loader-added signs remain in SCENERY and are excluded from this control.
+
+## 0.23.1
+
+- Separates territory authoring from railroad operation. F9 now presents the
+  signal/CTC schematic as a selection and configuration preview and keeps
+  train orders in authoring mode; live dispatcher and crew controls are in
+  Railroader's normal Company > Operations window through Signal Runtime
+  1.6.0.
+
+## 0.23.0
+
+- Completes the live train-order workflow: dispatcher issue, delivery to an
+  actual Railroader train crew, authenticated crew repeat/acknowledgement,
+  fulfillment, cancellation, timestamps, and an audit reason are synchronized
+  through Railroader's host-authoritative property state.
+- Adds a standalone F8 train-order window supplied by Signal Runtime. Crew
+  members can read and acknowledge orders in multiplayer without installing
+  or opening Tile Editor; Form 31 uses an explicit sign/repeat action.
+- Adds enforceable block authorities and optional order speed limits. A
+  delivered but unacknowledged order holds the assigned train. After
+  acknowledgement, the host permits only the union of the order's authored
+  blocks and holds at the authority limit.
+- Integrates authority limits with Auto Engineer's real stopping-distance
+  target and guards manually driven locomotives through replicated throttle
+  and brake controls. Player-owned Waypoint trains use the same enforcement.
+- Adds live train-crew selection and dispatcher controls to Operations >
+  Orders, plus quick block assignment and an enforcement toggle when writing
+  an order.
+- Synchronizes CTC switch/route requests and board indications as well. Remote
+  dispatcher clients use authenticated commands, while the host publishes the
+  active route, phase, reason, and corresponding semaphore clearance to every
+  client.
+
+## 0.22.0
+
+- Adds dedicated **Signals** and **Orders** pages to the Operations workspace
+  as the first complete-territory signaling foundation. Territory can be
+  modeled as timetable/train-order, ABS, or CTC while retaining a 1900-1950s
+  semaphore presentation.
+- Adds a live schematic CTC board with Normal/Reverse switch correspondence,
+  Main/Diverging route buttons, Stop/cancel, live runtime phase, and compact
+  track diagrams for every authored control point.
+- Adds in-world authoring for CTC control points from clicked turnout nodes.
+  Each control point stores portable board coordinates, power-switch labels,
+  entry signal IDs, route block IDs, and switch settings in
+  `ctc-system.json` beside the selected map graph.
+- Adds ABS/CTC/manual block authoring from clicked track segments. Blocks can
+  span multiple segments, own signals at both ends, and name the next block in
+  each direction for three-aspect Stop/Approach/Clear logic.
+- Adds a period train-order office with numbered Form 19, Form 31, track
+  warrant, meet, hold, and run-extra orders; train/crew, authority limits,
+  meet point, effective/expiry text, priority, instructions, and lifecycle
+  status are saved portably.
+- Extends the standalone Signal Runtime with safe host-authoritative switch
+  commands, CTC route conflict checks, switch locking and correspondence,
+  block occupancy, automatic route release, and two-direction ABS aspects.
+  Normal gameplay still does not require Tile Editor.
+
+## 0.21.0
+
+- Makes generated four-signal diamonds functional through the standalone
+  Signal Runtime. Live Railroader car locations request routes on the saved
+  approach chains; only one of A1/A2/B1/B2 can clear, conflicting semaphores
+  remain at Stop, the route locks as the train enters, and it releases only
+  after the diamond clears.
+- Adds compact live interlock controls to each generated approach signal:
+  runtime state, automatic/manual mode, request-this-approach, and fail-safe
+  release. A release request is refused while either crossing route is
+  occupied.
+- Adds a one-click block recalculation after independently moving a signal
+  mast. The editor keeps the exact hand-set transform, finds the nearest
+  segment on that saved approach, and rewrites its protected chain, approach
+  binding, direction, and interlocking approach node as one undoable edit.
+- Saves automatic operation and configurable release/cancel timing with every
+  newly generated diamond. Existing `train-signals.json` diamonds default to
+  automatic operation without requiring a rebuild.
+
+## 0.20.1
+
+- Makes the fixed footer context-aware on the Signals workspace. Its Undo and
+  Redo buttons now operate on `train-signals.json`, so a generated four-signal
+  diamond can be removed or restored as one edit without hunting for separate
+  controls inside the scrolling signal form.
+- Shows the signal undo/redo history counts in the footer and labels the third
+  control `Signals Auto-Saved` to make clear that signal edits are written
+  independently from `game-graph.json`.
+
+## 0.20.0
+
+- Makes diamond signal placement and block metadata traverse connected track
+  chains instead of stopping at the two selected crossing segments. A 500-800
+  m signal setback can now cross any number of normal segment boundaries.
+- Saves `protectedSegmentIds` for the complete block from each semaphore to
+  the diamond and `approachSegmentIds` for the longer approach-locking chain.
+  Each Railroad A/B route also saves its combined `segmentIds` collection.
+- Follows the sole continuation automatically. At a turnout or other
+  multi-choice node, scores heading alignment first while preferring matching
+  graph group, gauge, track class, and style; the build result reports every
+  ambiguous continuation it resolved.
+- Raises the supported signal setback to 5,000 m and changes the diamond
+  builder default to 600 m for realistic interlocking spacing.
+- Extends Signal Runtime's public signal and route records with the full
+  protected, approach, and interlocking route segment chains.
+
+## 0.19.0
+
+- Adds a four-signal railroad Diamond Interlocking builder to the Signals
+  workspace. Mark the two non-connecting crossing segments as Railroad A and
+  Railroad B, verify the detected crossing point/angle, then generate A1, A2,
+  B1, and B2 semaphore approaches in one undoable operation.
+- Samples the real Bezier curves to find the crossing instead of assuming a
+  midpoint. A vertical-separation check rejects overpasses, while signal
+  setback, side offset, vertical offset, head count, approach-locking length,
+  and release-block length remain configurable.
+- Keeps every generated signal as an independent record and amber world
+  object. Each can be moved, raised/lowered, rotated on all axes, flipped,
+  renamed, enabled/disabled, rebound, or aspect-tested after generation.
+  Renames and deletes update the diamond route's signal references.
+- Exposes parsed diamond route metadata through Signal Runtime
+  `Main.Interlockings`, including crossing point/angle, Railroad A/B segment
+  IDs, four signal IDs, approach node IDs, and locking lengths.
+
+## 0.18.0
+
+- Adds a dedicated in-game `SIGNALS` workspace for actual base-game animated
+  semaphore assemblies rather than decorative signal scenery. Place one-,
+  two-, or three-head signals at the mouse pointer, select their amber world
+  masts, move in WORLD/LOCAL axes, rotate/flip them, edit exact transforms,
+  enable/disable, delete, and test signal aspects.
+- Writes portable `train-signals.json` beside the selected graph with stable
+  signal IDs plus interlocking ID, protected node, protected segment, travel
+  direction, head count, transform, and starting aspect fields.
+- Adds the separately installable Hrogers Train Signal Runtime. It clones the
+  base game's CTC semaphore model while removing the original CTC behavior and
+  pickable so duplicate vanilla IDs cannot be created. The blade animation,
+  materials, and culling remain available to an external interlocking mod.
+- Exposes runtime signal discovery and aspect controls through
+  `Main.Signals`, `TryGetSignal`, and `TrySetAspect`. Normal gameplay requires
+  only the map and Signal Runtime, not Tile Editor.
+
+## 0.17.0
+
+- Moves authored grade crossings out of AI Traffic's private configuration
+  and into a portable `grade-crossings.json` stored with the edited map mod.
+- Adds the separately installable Hrogers Grade Crossing Runtime. It discovers
+  portable crossing files without loading the Tile Editor or AI Traffic and
+  registers native `TrackMarkerType.Crossing` markers in Railroader's shared
+  graph.
+- Registers each crossing on every connected approach segment by default.
+  Railroader's native crossing signaler therefore works from either direction
+  for unowned AI trains and player-owned locomotives using Waypoint Auto
+  Engineer mode.
+- Keeps placed signal and crossing-signal models as ordinary persisted scenery
+  entries. Players need the model's asset pack, but not the Tile Editor.
+
+## 0.16.9
+
+- Adds click-position insertion on a selected track segment. The click is
+  projected onto the exact Bezier instead of forcing a midpoint split.
+- Makes Add +10 m explicitly preserve the selected node's grade and pitch,
+  adds World/Local movement for spline points, and reduces a node transform
+  to one coalesced TrackObjectManager rebuild request.
+- Prevents track, spline, scenery, pole, and operations markers beneath the
+  F9 or Node Editor windows from receiving clicks.
+- Adds one-click turnout-stand flipping and persistent on/off control for the
+  physical bumper generated at a dead-end node. Bumper state is stored beside
+  the graph in `tile-editor-track-overrides.json`, keeping the RailLoader/FUSE
+  graph schema untouched.
+- Adds visual-only Signals, Crossings, and Signs scenery filters. Base-game
+  signs remain disableable through the Objects workspace.
+- Adds functional Auto Engineer grade-crossing marker toggles for selected
+  track nodes when AI Traffic is installed, followed by a live configuration
+  reload.
+- Limits graph, spline, pole, terrain, crossing, override, and full deployment
+  backups to the newest three copies.
+
+## 0.16.8
+
+- Adds a deliberate F9 camera-unlock modifier without restoring accidental
+  mouse flight. Hold the middle mouse button to temporarily return normal
+  Railroader mouse pan, orbit, and zoom controls; Tile Editor ignores world
+  clicks during that hold. Release middle mouse to resume editing.
+
+## 0.16.7
+
+- Adds a guarded `Clear Cache` button to the desktop OSM toolbar and the F9
+  Terrain OSM controls. Both show the current downloaded tile count and disk
+  usage, require a confirmation click, clear decoded map textures, and prevent
+  downloads already in flight from repopulating the cleared cache.
+- Excludes `Cache/OSM` from future live-mod deployment backups so packaging a
+  new editor version does not duplicate downloaded map tiles.
+
+## 0.16.6
+
+- Makes right-click in the world the universal editor cancel gesture. It
+  deselects track nodes/segments, Spliney points, scenery, poles, base-game
+  objects, and operations entries while cancelling node drags, pointer
+  placement, bridge picking, connections, Fit Arc chains, TrackSpan starts,
+  pole wiring, terrain strokes, and pending delete confirmations.
+- Reserves mouse input for editing while F9 is open. Railroader's raw
+  left-drag pan, right-drag orbit, mouse-look, and wheel zoom are suppressed;
+  strategy-camera movement remains available through W/A/S/D with the normal
+  fast-movement modifiers.
+- Keeps Bridge Directly from Track armed after each successful build. The
+  consumed segment and new trestle point are cleared, yellow overlays return,
+  and the editor immediately waits for the next track segment.
+- Adds an explicit `Build Another Bridge` action when an existing trestle
+  control point is selected, plus a persistent control hint in the panel
+  footer.
+
+## 0.16.5
+
+- Merges loaded RailLoader `SCAssetPacks` into the searchable scenery palette,
+  including late-registered assets omitted from Railroader's initial catalog.
+  Only identifiers the live scenery manager can actually resolve are shown.
+- Builds an AutoTrestle from the selected TrackSegment's two endpoint controls
+  and rotations. This reproduces the same single Bezier span without creating
+  redundant control nodes every eight meters.
+- Discovers loaded base-game roads and rivers as editable Spliney sources even
+  when they are absent from the selected mod graph. Their real control points
+  can be moved and rotated; the first edit creates a same-name graph override.
+- Rebuilds each edited base or mod road/river through `RiverPath.Rebuild`, so
+  its height, roadbed, water, dirt, object, and vegetation-mask modifiers
+  invalidate the affected terrain tiles.
+- Adds a small screen-space selection halo after normal collider and renderer
+  ray picking misses, making thin Mandela signs and small props easier to
+  select without allowing large scene roots.
+
 ## 0.16.4
 
 - Moves node naming, movement, rotation, exact transform editing, clipboard

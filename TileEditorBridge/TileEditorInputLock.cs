@@ -15,22 +15,22 @@ namespace Hrogers.TileEditorBridge
                     "Move",
                     "Run",
                     "VeryFast",
-                    "Crouch",
-                    "Jump",
                     "LeanLeft",
                     "LeanRight",
                     "ActivatePrimary",
-                    "ActivateSecondary",
                 },
                 StringComparer.OrdinalIgnoreCase);
 
         private readonly HashSet<InputAction> _editorDisabledInputActions =
             new HashSet<InputAction>();
         private InputActionAsset _editorLockedInputAsset;
+        private bool _editorWorldInputBlocked;
         private float _nextEditorInputLockCheckAt;
 
         private void SetGameInputLock(bool locked)
         {
+            TileEditorCameraInput.EditorInputActive =
+                locked && _runtimeEnabled && _visible;
             if (!locked)
             {
                 ReleaseGameInputLock();
@@ -45,6 +45,14 @@ namespace Hrogers.TileEditorBridge
             {
                 ReleaseGameInputLock();
                 return;
+            }
+            var worldInputBlocked =
+                TileEditorCameraInput.EditorWorldInputBlocked;
+            if (worldInputBlocked
+                != _editorWorldInputBlocked)
+            {
+                _editorWorldInputBlocked = worldInputBlocked;
+                force = true;
             }
             if (!force
                 && Time.unscaledTime
@@ -79,7 +87,8 @@ namespace Hrogers.TileEditorBridge
                             action.name,
                             "ActivatePrimary",
                             StringComparison.OrdinalIgnoreCase)
-                        && (_panelTab == PanelTab.Objects
+                        && (_editorWorldInputBlocked
+                            || _panelTab == PanelTab.Objects
                             || _panelTab == PanelTab.Terrain))
                     {
                         // These workspaces read the mouse pointer directly.
@@ -115,6 +124,8 @@ namespace Hrogers.TileEditorBridge
 
         private void ReleaseGameInputLock()
         {
+            TileEditorCameraInput.SetMouseCameraLocked(false);
+            TileEditorCameraInput.EditorInputActive = false;
             foreach (var action in
                      _editorDisabledInputActions)
             {
@@ -131,6 +142,8 @@ namespace Hrogers.TileEditorBridge
             }
             _editorDisabledInputActions.Clear();
             _editorLockedInputAsset = null;
+            _editorWorldInputBlocked = false;
+            TileEditorCameraInput.PointerOverEditorWindow = false;
             _nextEditorInputLockCheckAt = 0f;
         }
     }

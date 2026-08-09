@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Linq;
 using Helpers;
 using Map.Runtime;
@@ -36,6 +37,8 @@ namespace Hrogers.TileEditorBridge
         private int _liveSceneryCount;
         private int _sceneryOverlaySignature;
         private List<string> _sceneryAssetIdentifiers;
+        private int _runtimeSceneryAssetCount;
+        private int _railLoaderSceneryAssetCount;
         private string _cachedScenerySearch = string.Empty;
         private int _cachedScenerySearchOffset = -1;
         private int _cachedScenerySearchMaximum = -1;
@@ -63,20 +66,35 @@ namespace Hrogers.TileEditorBridge
         }
 
         internal int LiveSceneryCount => _liveSceneryCount;
+        internal string SceneryAssetLibrarySummary
+        {
+            get
+            {
+                EnsureSceneryAssetLibrary();
+                return _sceneryAssetIdentifiers.Count
+                       + " placeable assets ("
+                       + _runtimeSceneryAssetCount
+                       + " runtime, "
+                       + _railLoaderSceneryAssetCount
+                       + " RailLoader pack additions)";
+            }
+        }
 
         internal void SetWorkspaceMode(
             bool geoActive,
             bool sceneryActive,
             bool poleActive,
             bool splineyActive,
-            bool mandelaActive)
+            bool mandelaActive,
+            bool trainSignalActive)
         {
             if (_workspaceModeInitialized
                 && _geoWorkspaceActive == geoActive
                 && _sceneryMode == sceneryActive
                 && _poleMode == poleActive
                 && _splineyMode == splineyActive
-                && _mandelaMode == mandelaActive)
+                && _mandelaMode == mandelaActive
+                && _trainSignalMode == trainSignalActive)
             {
                 return;
             }
@@ -86,6 +104,7 @@ namespace Hrogers.TileEditorBridge
             SetSceneryMode(sceneryActive);
             SetPoleMode(poleActive);
             SetMandelaMode(mandelaActive);
+            SetTrainSignalMode(trainSignalActive);
             SetOverlaysVisible(
                 _editModeActive
                 && geoActive
@@ -684,9 +703,112 @@ namespace Hrogers.TileEditorBridge
             if (_sceneryAssetIdentifiers != null)
                 return;
             var manager = SceneryAssetManager.Shared;
-            _sceneryAssetIdentifiers = manager == null
+            var runtime = manager == null
                 ? new List<string>()
                 : manager.GetSceneryDefinitionIdentifiers();
+            var identifiers = new HashSet<string>(
+                runtime.Where(
+                    identifier =>
+                        !string.IsNullOrWhiteSpace(identifier)),
+                StringComparer.OrdinalIgnoreCase);
+            _runtimeSceneryAssetCount = identifiers.Count;
+            _railLoaderSceneryAssetCount = 0;
+            if (manager != null)
+            {
+                foreach (var identifier
+                         in DiscoverRailLoaderSceneryIdentifiers())
+                {
+                    // GetSceneryDefinitionIdentifiers can be populated
+                    // before RailLoader/Strange Customs finishes registering
+                    // its SCAssetPacks. DefinitionForIdentifier is the
+                    // authoritative late-bound lookup, so probe it directly.
+                    if (identifiers.Contains(identifier)
+                        || !manager.TryGetSceneryDefinition(
+                            identifier,
+                            out var _))
+                    {
+                        continue;
+                    }
+                    identifiers.Add(identifier);
+                    _railLoaderSceneryAssetCount++;
+                }
+            }
+            _sceneryAssetIdentifiers = identifiers
+                .OrderBy(
+                    identifier => identifier,
+                    StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        private IEnumerable<string>
+            DiscoverRailLoaderSceneryIdentifiers()
+        {
+            var modsDirectory = Path.Combine(_gameRoot, "Mods");
+            if (!Directory.Exists(modsDirectory))
+                yield break;
+
+            string[] files;
+            try
+            {
+                files = Directory.GetFiles(
+                    modsDirectory,
+                    "Definitions.json",
+                    SearchOption.AllDirectories);
+            }
+            catch (Exception ex)
+            {
+                _logger?.Warning(
+                    "Could not enumerate RailLoader scenery packs: "
+                    + ex.Message);
+                yield break;
+            }
+
+            foreach (var path in files)
+            {
+                var marker = Path.DirectorySeparatorChar
+                             + "SCAssetPacks"
+                             + Path.DirectorySeparatorChar;
+                if (path.IndexOf(
+                        marker,
+                        StringComparison.OrdinalIgnoreCase) < 0)
+                {
+                    continue;
+                }
+
+                JObject document;
+                try
+                {
+                    document = JObject.Parse(
+                        File.ReadAllText(path));
+                }
+                catch (Exception ex)
+                {
+                    _logger?.Warning(
+                        "Could not read RailLoader scenery definitions "
+                        + path + ": " + ex.Message);
+                    continue;
+                }
+
+                if (!(document["objects"] is JArray objects))
+                    continue;
+                foreach (var item in objects.OfType<JObject>())
+                {
+                    var definition = item["definition"] as JObject;
+                    if (!string.Equals(
+                            (string)definition?["kind"],
+                            "Scenery",
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+                    var identifier =
+                        ((string)item["identifier"]
+                         ?? (string)definition["identifier"]
+                         ?? string.Empty).Trim();
+                    if (identifier.Length > 0)
+                        yield return identifier;
+                }
+            }
         }
 
         private string NextSceneryId()
@@ -1051,7 +1173,8 @@ namespace Hrogers.TileEditorBridge
 
         public void Activate(PickableActivateEvent evt)
         {
-            _session?.SelectScenery(_scenery);
+            if (!TileEditorCameraInput.EditorWorldInputBlocked)
+                _session?.SelectScenery(_scenery);
         }
 
         public void Deactivate()

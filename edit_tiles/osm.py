@@ -39,24 +39,31 @@ class OsmOverlay:
     stitch them into a single pygame Surface at the right screen rectangle.
     """
 
-    def __init__(self):
+    def __init__(self, cache_dir: Path | None = None):
         self.enabled  = False
         self.opacity  = 140          # 0-255 alpha for overlay
         self.zoom     = OSM_ZOOM
+        self.cache_dir = Path(cache_dir) if cache_dir is not None else OSM_CACHE_DIR
         # surf_cache: (tx, ty, zoom) -> pygame.Surface (stitched, editor-tile-sized)
         self._surf_cache: dict = {}
         # fetch_queue: set of (osm_x, osm_y, zoom) currently being downloaded
         self._fetching: set   = set()
         self._lock            = threading.Lock()
+        self._cache_generation = 0
+        self._disk_cache_files = 0
+        self._disk_cache_bytes = 0
+        self._disk_stats_ready = False
         # raw tile cache: (osm_x, osm_y, zoom) -> raw PNG bytes
         self._raw: dict       = {}
         self._executor        = ThreadPoolExecutor(max_workers=OSM_MAX_FETCH,
                                                    thread_name_prefix='osm')
-        OSM_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self._executor.submit(
+            self._refresh_disk_cache_stats, self._cache_generation)
 
     # ------------------------------------------------------------------
     def _cache_path(self, ox: int, oy: int, z: int) -> Path:
-        return OSM_CACHE_DIR / str(z) / str(ox) / f"{oy}.png"
+        return self.cache_dir / str(z) / str(ox) / f"{oy}.png"
 
     def _load_disk(self, ox: int, oy: int, z: int) -> bytes | None:
         p = self._cache_path(ox, oy, z)
@@ -64,12 +71,14 @@ class OsmOverlay:
             return p.read_bytes()
         return None
 
-    def _save_disk(self, ox: int, oy: int, z: int, data: bytes):
+    def _save_disk(self, ox: int, oy: int, z: int, data: bytes) -> tuple:
         p = self._cache_path(ox, oy, z)
+        old_size = p.stat().st_size if p.exists() else 0
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_bytes(data)
+        return old_size, len(data)
 
-    def _fetch_tile(self, ox: int, oy: int, z: int):
+    def _fetch_tile(self, ox: int, oy: int, z: int, generation: int):
         """Background thread: fetch one OSM tile, save to disk + memory."""
         key = (ox, oy, z)
         try:
@@ -82,14 +91,27 @@ class OsmOverlay:
                       headers={'User-Agent': OSM_USER_AGENT})
                 with urllib.request.urlopen(req, timeout=10) as resp:
                     data = resp.read()
-                self._save_disk(ox, oy, z, data)
             with self._lock:
+                if generation != self._cache_generation:
+                    return
+                if not self._cache_path(ox, oy, z).exists():
+                    old_size, new_size = self._save_disk(
+                        ox, oy, z, data)
+                    if self._disk_stats_ready:
+                        if old_size == 0:
+                            self._disk_cache_files += 1
+                        self._disk_cache_bytes = max(
+                            0,
+                            self._disk_cache_bytes
+                            - old_size
+                            + new_size)
                 self._raw[key] = data
         except Exception as e:
             pass   # silently ignore — tile stays missing
         finally:
             with self._lock:
-                self._fetching.discard(key)
+                if generation == self._cache_generation:
+                    self._fetching.discard(key)
 
     def _ensure_tile(self, ox: int, oy: int, z: int):
         """Queue a fetch if not already in memory or in-flight."""
@@ -98,7 +120,81 @@ class OsmOverlay:
             if key in self._raw or key in self._fetching:
                 return
             self._fetching.add(key)
-        self._executor.submit(self._fetch_tile, ox, oy, z)
+            generation = self._cache_generation
+        self._executor.submit(
+            self._fetch_tile, ox, oy, z, generation)
+
+    def _refresh_disk_cache_stats(self, generation: int):
+        """Count cached tiles off the UI thread."""
+        files = 0
+        size = 0
+        try:
+            for path in self.cache_dir.rglob("*.png"):
+                try:
+                    files += 1
+                    size += path.stat().st_size
+                except OSError:
+                    pass
+        except OSError:
+            pass
+        with self._lock:
+            if generation == self._cache_generation:
+                self._disk_cache_files = files
+                self._disk_cache_bytes = size
+                self._disk_stats_ready = True
+
+    def cache_stats(self) -> tuple:
+        """Return (ready, tile_count, byte_count) for the toolbar."""
+        with self._lock:
+            return (
+                self._disk_stats_ready,
+                self._disk_cache_files,
+                self._disk_cache_bytes,
+            )
+
+    def clear_disk_cache(self) -> tuple:
+        """Clear downloaded OSM tiles and invalidate in-flight fetches."""
+        with self._lock:
+            self._cache_generation += 1
+            self._raw.clear()
+            self._surf_cache.clear()
+            self._fetching.clear()
+            self._disk_stats_ready = False
+
+        removed_files = 0
+        removed_bytes = 0
+        try:
+            paths = list(self.cache_dir.rglob("*.png"))
+        except OSError:
+            paths = []
+        for path in paths:
+            try:
+                size = path.stat().st_size
+                path.unlink()
+                removed_files += 1
+                removed_bytes += size
+            except OSError:
+                pass
+
+        try:
+            directories = sorted(
+                (p for p in self.cache_dir.rglob("*") if p.is_dir()),
+                key=lambda p: len(p.parts),
+                reverse=True,
+            )
+        except OSError:
+            directories = []
+        for directory in directories:
+            try:
+                directory.rmdir()
+            except OSError:
+                pass
+
+        with self._lock:
+            self._disk_cache_files = 0
+            self._disk_cache_bytes = 0
+            self._disk_stats_ready = True
+        return removed_files, removed_bytes
 
     def _raw_to_surf(self, data: bytes) -> pygame.Surface | None:
         """Decode PNG bytes → pygame Surface."""
@@ -227,4 +323,3 @@ class OsmOverlay:
             scaled = pygame.transform.scale(surf, (disp, disp))
             scaled.set_alpha(self.opacity)
             screen.blit(scaled, (int(sx), int(sy)))
-

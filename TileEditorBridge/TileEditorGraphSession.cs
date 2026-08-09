@@ -311,6 +311,8 @@ namespace Hrogers.TileEditorBridge
             SetTelegraphPoleOverlaysVisible(active && _poleMode);
             SetOperationOverlaysVisible(
                 active && _operationsMode && GraphOpen);
+            SetTrainSignalOverlaysVisible(
+                active && _trainSignalMode && GraphOpen);
         }
 
         internal void RefreshEditMode()
@@ -333,6 +335,8 @@ namespace Hrogers.TileEditorBridge
                 SetTelegraphPoleOverlaysVisible(_poleMode);
                 if (_operationsMode)
                     RefreshOperationsMode(true);
+                if (_trainSignalMode)
+                    RefreshTrainSignalOverlays();
             }
             if (_editModeActive)
             {
@@ -355,6 +359,8 @@ namespace Hrogers.TileEditorBridge
                 RefreshTelegraphPoleMode();
             if (_operationsMode)
                 RefreshOperationsMode(false);
+            if (_trainSignalMode)
+                RefreshLockedTrainSignalOverlayTransforms();
         }
 
         internal bool TryOpenGraph(string path)
@@ -381,6 +387,8 @@ namespace Hrogers.TileEditorBridge
             _fuseNativeDocument = IsFuseNativeDocument(path, document);
             ResetOpenGraphIdentitySets();
             _graphPath = Path.GetFullPath(path);
+            TileEditorTrackOverrides.LoadForGraph(_graphPath);
+            RefreshAutoEngineerCrossings();
             _backupPath = string.Empty;
             _undo.Clear();
             _redo.Clear();
@@ -399,6 +407,8 @@ namespace Hrogers.TileEditorBridge
             ResetScenerySession();
             ResetMandelaSession();
             ResetOperationsSession();
+            ResetTrainSignalSession();
+            ResetCtcSession();
             if (_operationsMode)
                 RefreshOperationsMode(true);
         }
@@ -471,6 +481,35 @@ namespace Hrogers.TileEditorBridge
                 _selectedSegment);
         }
 
+        private void ClearTrackSelection()
+        {
+            var previousNode = _selectedNode;
+            var previousSegment = _selectedSegment;
+            _selectedNode = null;
+            _selectedSegment = null;
+            RefreshTrackSelectionColors(
+                previousNode,
+                previousSegment,
+                null,
+                null);
+        }
+
+        internal void ClearAllSelections()
+        {
+            CancelNodeDrag();
+            ClearTrackSelection();
+            ClearSplineSelection();
+            if (_splineTrackPickMode)
+                SetSplineTrackPickMode(false);
+            ClearSelectedScenery();
+            ClearSelectedTelegraphPole();
+            ClearSelectedMandela();
+            ClearSelectedTrainSignal();
+            SelectOperation(string.Empty);
+            _worldNodeShortcutStatus =
+                "Selection cleared. Click any editable object to continue.";
+        }
+
         internal bool IsSelected(TrackNode node)
         {
             return node != null && _selectedNode == node;
@@ -487,10 +526,11 @@ namespace Hrogers.TileEditorBridge
             var id = NextNodeId();
             var segmentId = NextSegmentId();
             var rotation = start.transform.localEulerAngles;
+            var grade = SelectedNodeGrade();
             var position = start.transform.localPosition
-                           + Quaternion.Euler(rotation)
-                           * Vector3.forward
-                           * 10f;
+                           + HorizontalForward(rotation.y) * 10f;
+            position.y += 10f * grade / 100f;
+            rotation.x = PitchFromGrade(grade);
             ExecuteEdit(
                 "Add connected node",
                 new[] { start.id, id },
@@ -646,9 +686,37 @@ namespace Hrogers.TileEditorBridge
 
         internal void InjectSelectedSegment()
         {
+            InjectSelectedSegmentAtParameter(0.5f);
+        }
+
+        internal string InjectSelectedSegmentAtPosition(
+            Vector3 gamePosition)
+        {
+            var original = RequireSegment();
+            ValidateVector(gamePosition, "track insertion position");
+            var t = ClosestCurveParameter(
+                original.Curve,
+                gamePosition);
+            if (t <= 0.01f || t >= 0.99f)
+            {
+                throw new InvalidOperationException(
+                    "Click farther from the segment endpoint. Use the "
+                    + "existing endpoint node when working at the end of track.");
+            }
+            InjectSelectedSegmentAtParameter(t);
+            return "Inserted node at "
+                   + (t * 100f).ToString(
+                       "0.#",
+                       CultureInfo.InvariantCulture)
+                   + "% of the selected segment";
+        }
+
+        private void InjectSelectedSegmentAtParameter(float parameter)
+        {
             var original = RequireSegment();
             var originalModel = CaptureSegment(original);
             var curve = original.Curve;
+            var t = Mathf.Clamp01(parameter);
             var nodeId = NextNodeId();
             var firstId = NextSegmentId();
             var secondId = NextSegmentId();
@@ -669,8 +737,8 @@ namespace Hrogers.TileEditorBridge
                     var node = CreateNodeLive(new NodeModel
                     {
                         Id = nodeId,
-                        Position = curve.GetPoint(0.5f),
-                        Rotation = curve.GetRotation(0.5f).eulerAngles,
+                        Position = curve.GetPoint(t),
+                        Rotation = curve.GetRotation(t).eulerAngles,
                     });
                     WriteNode(node);
                     var first = CreateSegmentLive(CopySegment(
@@ -683,6 +751,42 @@ namespace Hrogers.TileEditorBridge
                     _selectedSegment = null;
                 },
                 useTargetedTrackRebuild: true);
+        }
+
+        private static float ClosestCurveParameter(
+            BezierCurve curve,
+            Vector3 position)
+        {
+            const int samples = 80;
+            var bestT = 0f;
+            var bestDistance = float.PositiveInfinity;
+            for (var index = 0; index <= samples; index++)
+            {
+                var t = index / (float)samples;
+                var distance = (curve.GetPoint(t) - position).sqrMagnitude;
+                if (distance >= bestDistance)
+                    continue;
+                bestDistance = distance;
+                bestT = t;
+            }
+
+            var radius = 1f / samples;
+            var left = Mathf.Max(0f, bestT - radius);
+            var right = Mathf.Min(1f, bestT + radius);
+            for (var pass = 0; pass < 8; pass++)
+            {
+                var first = Mathf.Lerp(left, right, 1f / 3f);
+                var second = Mathf.Lerp(left, right, 2f / 3f);
+                var firstDistance =
+                    (curve.GetPoint(first) - position).sqrMagnitude;
+                var secondDistance =
+                    (curve.GetPoint(second) - position).sqrMagnitude;
+                if (firstDistance <= secondDistance)
+                    right = second;
+                else
+                    left = first;
+            }
+            return (left + right) * 0.5f;
         }
 
         internal void SplitSelectedNode()
@@ -753,6 +857,38 @@ namespace Hrogers.TileEditorBridge
                 {
                     node.transform.localEulerAngles += Vector3.up * 180f;
                 });
+        }
+
+        internal void ToggleSelectedSwitchStand()
+        {
+            var node = RequireNode();
+            if (_graph.SegmentsConnectedTo(node).Count() < 3)
+            {
+                throw new InvalidOperationException(
+                    "A turnout stand requires a junction with at least "
+                    + "three connected track segments.");
+            }
+            EditSelectedNodeTransform(
+                "Flip turnout stand",
+                selected => selected.flipSwitchStand =
+                    !selected.flipSwitchStand);
+        }
+
+        internal bool SelectedNodeBumperEnabled =>
+            _selectedNode == null
+            || TileEditorTrackOverrides.BumperEnabled(_selectedNode.id);
+
+        internal void ToggleSelectedTrackBumper()
+        {
+            var node = RequireNode();
+            if (!_graph.NodeIsDeadEnd(node, out _))
+            {
+                throw new InvalidOperationException(
+                    "Track bumpers can only be changed at a dead-end node.");
+            }
+            var enabled = !TileEditorTrackOverrides.BumperEnabled(node.id);
+            TileEditorTrackOverrides.SetBumperEnabled(node.id, enabled);
+            TrackObjectManager.Instance?.SetNeedsRebuild(node);
         }
 
         internal void MoveSelectedNode(Vector3 offset, bool localAxes)
@@ -1103,6 +1239,7 @@ namespace Hrogers.TileEditorBridge
                               + DateTime.Now.ToString("yyyyMMdd-HHmmss",
                                   CultureInfo.InvariantCulture);
                 File.Copy(_graphPath, _backupPath, false);
+                TileEditorBackupRetention.PruneFor(_graphPath);
             }
 
             var temp = _graphPath + ".tile-editor.tmp";
@@ -1168,6 +1305,8 @@ namespace Hrogers.TileEditorBridge
                 ResetScenerySession();
                 ResetMandelaSession();
                 ResetOperationsSession();
+                ResetTrainSignalSession();
+                ResetCtcSession();
             }
             return "Desktop content reloaded"
                    + (conflicts == 0
@@ -2069,6 +2208,8 @@ namespace Hrogers.TileEditorBridge
             DisposeScenerySession();
             DisposeMandelaSession();
             DisposeOperationsSession();
+            DisposeCtcSession();
+            DisposeTrainSignalOverlays();
             foreach (var overlay in Resources.FindObjectsOfTypeAll<TileEditorNodeOverlay>())
             {
                 if (overlay != null)
@@ -2183,7 +2324,8 @@ namespace Hrogers.TileEditorBridge
                 segments,
                 useTargetedTrackRebuild:
                     useLightweightTrackUpdate
-                    || useTargetedTrackRebuild);
+                    || useTargetedTrackRebuild,
+                nodeTransformOnly: useLightweightTrackUpdate);
             edit.AfterNodes = CaptureNodes(nodes);
             edit.AfterSegments = CaptureSegments(segments);
             edit.AfterScenery =
@@ -2307,6 +2449,8 @@ namespace Hrogers.TileEditorBridge
                     edit.NodeIds,
                     edit.SegmentIds,
                     useTargetedTrackRebuild:
+                        edit.UseLightweightTrackUpdate,
+                    nodeTransformOnly:
                         edit.UseLightweightTrackUpdate);
             }
             var selectedNode = after ? edit.AfterSelectedNode : edit.BeforeSelectedNode;
@@ -2501,7 +2645,8 @@ namespace Hrogers.TileEditorBridge
             IEnumerable<string> affectedNodeIds = null,
             IEnumerable<string> affectedSegmentIds = null,
             bool rebuildAllOverlays = false,
-            bool useTargetedTrackRebuild = false)
+            bool useTargetedTrackRebuild = false,
+            bool nodeTransformOnly = false)
         {
             if (_graph == null)
                 return;
@@ -2523,13 +2668,16 @@ namespace Hrogers.TileEditorBridge
                     var rebuildNodeIds = new HashSet<string>(
                         nodeIds,
                         StringComparer.OrdinalIgnoreCase);
-                    foreach (var segmentId in segmentIds)
+                    if (!nodeTransformOnly)
                     {
-                        var segment = _graph.GetSegment(segmentId);
-                        if (segment?.a != null)
-                            rebuildNodeIds.Add(segment.a.id);
-                        if (segment?.b != null)
-                            rebuildNodeIds.Add(segment.b.id);
+                        foreach (var segmentId in segmentIds)
+                        {
+                            var segment = _graph.GetSegment(segmentId);
+                            if (segment?.a != null)
+                                rebuildNodeIds.Add(segment.a.id);
+                            if (segment?.b != null)
+                                rebuildNodeIds.Add(segment.b.id);
+                        }
                     }
                     foreach (var nodeId in rebuildNodeIds)
                     {
@@ -2610,6 +2758,8 @@ namespace Hrogers.TileEditorBridge
                 nodeIds,
                 segmentIds,
                 rebuildAllOverlays);
+            if (_trainSignalMode)
+                RefreshLockedTrainSignalOverlayTransforms();
         }
 
         private void RebuildOverlays(bool rebuildExisting)

@@ -2606,7 +2606,8 @@ namespace Hrogers.TileEditorBridge
 
         public void Activate(PickableActivateEvent evt)
         {
-            if (evt.Activation == PickableActivation.Primary)
+            if (!TileEditorCameraInput.EditorWorldInputBlocked
+                && evt.Activation == PickableActivation.Primary)
                 _session?.SelectOperation(_item?.Key);
         }
 

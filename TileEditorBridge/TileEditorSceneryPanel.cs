@@ -736,6 +736,23 @@ namespace Hrogers.TileEditorBridge
             GUILayout.Label(
                 "ASSET LIBRARY",
                 _titleStyle);
+            GUILayout.Label(
+                _mapEditor.SceneryAssetLibrarySummary,
+                _mutedStyle);
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("SIGNALS", GUILayout.Height(27f)))
+                _scenerySearch = "signal";
+            if (GUILayout.Button("CROSSINGS", GUILayout.Height(27f)))
+                _scenerySearch = "crossing";
+            if (GUILayout.Button("SIGNS", GUILayout.Height(27f)))
+                _scenerySearch = "sign";
+            if (GUILayout.Button("ALL", GUILayout.Height(27f)))
+                _scenerySearch = string.Empty;
+            GUILayout.EndHorizontal();
+            GUILayout.Label(
+                "Signal and crossing buttons place visual 3D scenery only. "
+                + "Disable a base-game sign from OBJECTS after selecting it.",
+                _mutedStyle);
             GUILayout.BeginHorizontal();
             GUILayout.Label("Search", GUILayout.Width(70f));
             _scenerySearch = GUILayout.TextField(

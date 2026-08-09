@@ -231,7 +231,11 @@ namespace Hrogers.TileEditorBridge
                 return;
             if (Input.GetKeyDown(KeyCode.F9))
                 SetVisible(!_visible);
+            TileEditorCameraInput.PointerOverEditorWindow =
+                _visible && IsPointerOverEditorWindow();
+            HandleCameraNavigationToggle();
             MaintainGameInputLock();
+            UpdateSurveyHud();
             _mapEditor?.SetExternalEditorLocks(
                 DesktopGraphHasUnsavedChanges,
                 DesktopTerrainHasUnsavedChanges);
@@ -239,9 +243,19 @@ namespace Hrogers.TileEditorBridge
                 _mapEditor?.PollTerrainRebuildStatus();
             if (!string.IsNullOrWhiteSpace(terrainRebuildStatus))
                 _lastPanelMessage = terrainRebuildStatus;
-            _mapEditor?.UpdateNodeDragFromPointer(
-                IsPointerOverEditorWindow());
-            UpdateWorldPointerTools();
+            if (TileEditorCameraInput.CameraNavigationUnlocked)
+            {
+                EndTerrainStroke();
+                _mapEditor?.CancelNodeDrag();
+                HideWorldPointerMarker();
+            }
+            else
+            {
+                HandleUniversalDeselectInput();
+                _mapEditor?.UpdateNodeDragFromPointer(
+                    IsPointerOverEditorWindow());
+                UpdateWorldPointerTools();
+            }
             UpdateOsmOverlay();
             if (Time.unscaledTime >= _nextReadAt)
             {
@@ -345,6 +359,34 @@ namespace Hrogers.TileEditorBridge
                         MinNodeWindowHeight,
                         Screen.height - _nodeWindowRect.y - 4f));
             }
+            DrawSurveyHud();
+        }
+
+        private void HandleCameraNavigationToggle()
+        {
+            if (!_visible
+                || !TileEditorCameraInput.EditorInputActive
+                || !Input.GetMouseButtonDown(2))
+            {
+                return;
+            }
+            ToggleCameraNavigationLock();
+        }
+
+        private void ToggleCameraNavigationLock()
+        {
+            var locked = !TileEditorCameraInput.MouseCameraLocked;
+            TileEditorCameraInput.SetMouseCameraLocked(locked);
+            if (!locked)
+            {
+                EndTerrainStroke();
+                _mapEditor?.CancelNodeDrag();
+                HideWorldPointerMarker();
+            }
+            MaintainGameInputLock(force: true);
+            _lastPanelMessage = locked
+                ? "Camera locked: WASD move, wheel zoom, Q/E rotate"
+                : "Camera free: Railroader mouse camera restored";
         }
 
         private void DrawWindow(int id)
@@ -667,6 +709,7 @@ namespace Hrogers.TileEditorBridge
 
         private void OnDestroy()
         {
+            TileEditorCameraInput.PointerOverEditorWindow = false;
             SaveNodeWindowGeometry();
             EndTerrainStroke();
             DisposeWorldPointerTools();
@@ -686,6 +729,7 @@ namespace Hrogers.TileEditorBridge
             _visible = visible;
             if (!visible)
             {
+                TileEditorCameraInput.PointerOverEditorWindow = false;
                 SaveNodeWindowGeometry();
                 _mapEditor?.CancelNodeDrag();
                 CancelPointerPlacement(false);

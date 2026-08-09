@@ -1,10 +1,14 @@
 {
   "packageId": "Hrogers.TileEditorBridge",
   "displayName": "Hrogers Tile Editor Suite",
-  "version": "0.16.4",
+  "version": "0.25.0",
   "bridgeProtocolVersion": 1,
   "game": "Railroader",
   "loader": "Unity Mod Manager",
+  "portableRuntimeMods": [
+    "Hrogers.SignalRuntime",
+    "Hrogers.CrossingRuntime"
+  ],
   "desktopEditor": {
     "entryPoint": "TileEditor/edit_tiles",
     "launcher": "Launch Tile Editor.bat",

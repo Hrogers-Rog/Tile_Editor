@@ -13,7 +13,9 @@ namespace Hrogers.TileEditorBridge
             None,
             FreeTrackNode,
             ConnectedTrackNode,
+            SegmentControlNode,
             Scenery,
+            TrainSignal,
             MandelaClone,
             ConnectedPole,
             StandalonePole,
@@ -71,7 +73,8 @@ namespace Hrogers.TileEditorBridge
             }
             if (_panelTab != _pointerPlacementTab
                 || Input.GetKeyDown(KeyCode.Escape)
-                || Input.GetMouseButtonDown(1))
+                || (Input.GetMouseButtonDown(1)
+                    && !IsPointerOverEditorWindow()))
             {
                 CancelPointerPlacement();
                 return;
@@ -165,6 +168,10 @@ namespace Hrogers.TileEditorBridge
                             yaw,
                             true);
                         break;
+                    case PointerPlacementKind.SegmentControlNode:
+                        result = _mapEditor.InjectSelectedSegmentAtPosition(
+                            WorldTransformer.WorldToGame(worldPosition));
+                        break;
                     case PointerPlacementKind.Scenery:
                         var sceneryId =
                             _mapEditor.CreateSceneryAtPosition(
@@ -173,6 +180,27 @@ namespace Hrogers.TileEditorBridge
                                     worldPosition),
                                 yaw);
                         result = "Placed scenery " + sceneryId;
+                        break;
+                    case PointerPlacementKind.TrainSignal:
+                        result = _mapEditor.CreateTrainSignalAtPosition(
+                            _trainSignalId,
+                            WorldTransformer.WorldToGame(worldPosition),
+                            yaw,
+                            _trainSignalHeadCount,
+                            _trainSignalAspect,
+                            _trainSignalInterlockingId,
+                            _trainSignalProtectedNodeId,
+                            _trainSignalProtectedSegmentId,
+                            _trainSignalDirection,
+                            _trainSignalSnapOnPlace,
+                            _trainSignalLockOnPlace,
+                            ParseFloat(
+                                _trainSignalSnapSideOffset,
+                                "signal side offset"),
+                            ParseFloat(
+                                _trainSignalSnapVerticalOffset,
+                                "signal vertical offset"),
+                            _trainSignalSnapRight);
                         break;
                     case PointerPlacementKind.MandelaClone:
                         var targetPath =
@@ -306,6 +334,32 @@ namespace Hrogers.TileEditorBridge
             HideWorldPointerMarker();
             if (updateStatus)
                 _lastPanelMessage = "Pointer placement cancelled";
+        }
+
+        private void HandleUniversalDeselectInput()
+        {
+            if (!_visible
+                || !_runtimeEnabled
+                || !Input.GetMouseButtonDown(1)
+                || IsPointerOverEditorWindow())
+            {
+                return;
+            }
+
+            CancelPointerPlacement(false);
+            EndTerrainStroke();
+            _connectStartId = string.Empty;
+            _fitArcNodeIds.Clear();
+            _poleWireStartId = -1;
+            _opsMarkedSpanStartSegment = string.Empty;
+            _deleteConfirmId = string.Empty;
+            _sceneryDeleteConfirm = string.Empty;
+            _poleDeleteConfirm = string.Empty;
+            _trainSignalDeleteConfirm = string.Empty;
+            _mapEditor?.ClearAllSelections();
+            HideWorldPointerMarker();
+            _lastPanelMessage =
+                "Selection and active editor tool cleared";
         }
 
         private bool TryGetPointerSurfaceHit(

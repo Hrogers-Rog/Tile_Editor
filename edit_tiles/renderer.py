@@ -1872,14 +1872,34 @@ class DrawMixin:
         osm_control_specs = []
         osm_controls_w = 0
         if self.osm.enabled:
+            cache_ready, cache_files, cache_bytes = self.osm.cache_stats()
+            if not cache_ready:
+                cache_label = "checking..."
+            elif cache_bytes >= 1024 * 1024 * 1024:
+                cache_label = f"{cache_bytes / (1024**3):.2f} GB"
+            elif cache_bytes >= 1024 * 1024:
+                cache_label = f"{cache_bytes / (1024**2):.0f} MB"
+            elif cache_bytes >= 1024:
+                cache_label = f"{cache_bytes / 1024:.0f} KB"
+            else:
+                cache_label = f"{cache_bytes} B"
             osm_control_specs = [
                 ("Zoom -", "osm_zoom_out", OK_COLOR),
                 ("Zoom +", "osm_zoom_in", OK_COLOR),
                 ("Fade -", "osm_opacity_down", ACCENT_COLOR),
                 ("Fade +", "osm_opacity_up", ACCENT_COLOR),
+                (
+                    "CONFIRM CLEAR" if self.osm_clear_cache_confirm else "Clear Cache",
+                    "osm_clear_cache",
+                    WARN_COLOR,
+                ),
             ]
             osm_pct = int(round(self.osm.opacity * 100 / 255))
-            osm_chip_w = self.font.get_rect(f"OSM z{self.osm.zoom}  {osm_pct}%").width + 14
+            osm_chip_text = (
+                f"OSM z{self.osm.zoom}  {osm_pct}%  •  "
+                f"{cache_label} / {cache_files:,} tiles"
+            )
+            osm_chip_w = self.font.get_rect(osm_chip_text).width + 14
             osm_controls_w = osm_chip_w + 8
             osm_controls_w += sum(self.font_big.get_rect(label).width + 18 for label, _, _ in osm_control_specs)
             osm_controls_w += 6 * len(osm_control_specs)
@@ -1890,9 +1910,17 @@ class DrawMixin:
                 ("Z+", "osm_zoom_in", OK_COLOR),
                 ("Op-", "osm_opacity_down", ACCENT_COLOR),
                 ("Op+", "osm_opacity_up", ACCENT_COLOR),
+                (
+                    "CONFIRM" if self.osm_clear_cache_confirm else "Clear",
+                    "osm_clear_cache",
+                    WARN_COLOR,
+                ),
             ]
             osm_pct = int(round(self.osm.opacity * 100 / 255))
-            osm_chip_w = self.font.get_rect(f"OSM z{self.osm.zoom}  {osm_pct}%").width + 14
+            osm_chip_text = (
+                f"OSM z{self.osm.zoom} {osm_pct}% • {cache_label}"
+            )
+            osm_chip_w = self.font.get_rect(osm_chip_text).width + 14
             osm_controls_w = osm_chip_w + 8
             osm_controls_w += sum(self.font_big.get_rect(label).width + 18 for label, _, _ in osm_control_specs)
             osm_controls_w += 6 * len(osm_control_specs)
@@ -1900,7 +1928,8 @@ class DrawMixin:
         if self.osm.enabled:
             osm_x = max(x + 16, quick_x - osm_controls_w)
             osm_pct = int(round(self.osm.opacity * 100 / 255))
-            chip = draw_status_chip(f"OSM z{self.osm.zoom}  {osm_pct}%", osm_x, row1_y, OK_COLOR)
+            chip = draw_status_chip(
+                osm_chip_text, osm_x, row1_y, OK_COLOR)
             osm_x = chip.right + 8
             for label, action, color in osm_control_specs:
                 rect = draw_top_button(label, action, osm_x, row1_y, state='neutral', color=color, enabled=True)

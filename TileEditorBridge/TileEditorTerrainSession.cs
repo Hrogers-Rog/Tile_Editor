@@ -1147,6 +1147,7 @@ namespace Hrogers.TileEditorBridge
                 Path.GetDirectoryName(outputPath)
                 ?? string.Empty);
             File.Copy(backupSource, backup, false);
+            TileEditorBackupRetention.PruneFor(outputPath);
             _terrainBackups[outputPath] = backup;
         }
 

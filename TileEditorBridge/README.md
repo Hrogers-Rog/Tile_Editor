@@ -1,4 +1,88 @@
-# Hrogers Tile Editor Suite 0.16.4
+# Hrogers Tile Editor Suite 0.25.0
+
+Hold **Shift+?** in F9 for a live pointer survey showing map/game, Unity
+world, graph-local, terrain-tile, and tile-local coordinates plus the nearest
+track's signed grade, heading, chainage, gauge, class, and group. F9 no longer
+locks the mouse camera automatically: middle mouse toggles between normal
+Railroader mouse navigation and an editing-safe camera lock. While locked,
+use W/A/S/D to move, the wheel to zoom, and Q/E to rotate.
+
+## Period signaling, CTC, ABS, and train orders
+
+The Operations workspace now contains **Signals** and **Orders** pages for a
+1900-1950s operating system. Select timetable/train-order, ABS, or CTC as the
+territory mode. Signal hardware begins with Railroader's semaphore family;
+the operating data is independent of the visual asset so later searchlight or
+position-light families can use the same blocks and routes.
+
+The Signals page contains a schematic territory preview for authoring. Create a control
+point by clicking a turnout node, then assign its Normal and Reverse entry
+signals and comma-separated protected block IDs. Live dispatching is in the
+normal **Company > Operations > Signals & CTC** page supplied by standalone
+Signal Runtime. There, a dispatcher can command Normal/Reverse, line either
+route, or return the plant to Stop. The runtime checks cars on switches, block
+occupancy, conflicting routes, and switch correspondence before clearing a
+signal. A switch remains locked until the movement occupies and clears its
+route plus the time release.
+
+ABS/CTC blocks are created from a clicked segment and extended one selected
+segment at a time. Assign the signal at each end and, for three-aspect ABS,
+the next block encountered by a train entering from that end. An occupied
+block displays Stop; a clear block followed by an occupied or missing named
+next block displays Approach; two clear blocks display Clear. Manual blocks
+hold their signals at Stop until a later operator/train-order authority layer
+explicitly clears them.
+
+The Orders page creates numbered Form 19, Form 31, track warrant, meet, hold,
+and run-extra records with train, crew, block limits, meet location,
+instructions, effective/expiry text, priority, and lifecycle settings. Issue
+and deliver orders to real Railroader train crews from **Company > Operations
+> Train Orders**. Crew members use **My Orders** there or press F8 to read,
+repeat/sign, and acknowledge through standalone Signal Runtime. The multiplayer host records the real player and time, then
+enforces the authored block authority for manual locomotives and Auto
+Engineer/Waypoint operation. Tile Editor is not required on crew clients.
+All territory data is stored in `ctc-system.json` beside the edited graph.
+
+## Portable train signals and grade crossings
+
+The dedicated `SIGNALS` workspace places Railroader's own animated semaphore
+assemblies rather than decorative scenery. Choose one, two, or three heads;
+place at the mouse pointer; move, rotate, or flip it; test an aspect; and save
+stable interlocking, protected-node, protected-segment, and direction metadata.
+Signals are written immediately to `train-signals.json` beside the selected
+map graph. Distribute the standalone `Hrogers.SignalRuntime` with the map. It
+loads the base-game signal asset and operates generated diamond interlockings
+without requiring Tile Editor during gameplay.
+
+The Diamond Interlocking builder accepts two non-connecting crossing track
+segments, finds their actual curve intersection, and creates A1/A2/B1/B2
+semaphores at adjustable setback, side-offset, and vertical-offset values. It
+stores the two conflicting railroad routes plus approach/release lengths. The
+four signals are normal independent records: click any amber mast afterward to
+move, rotate, flip, rename, rebind, change its heads, or test its aspect.
+Signal setbacks can extend to 5,000 m. Each of the four approaches walks the
+connected graph across as many segments as necessary; at a turnout it chooses
+the best-aligned continuation while preferring the same group, gauge, class,
+and style. The saved signal distinguishes the protected segment chain between
+the mast and diamond from the additional approach-locking chain behind it.
+If a mast is moved later, select it and use **Recalculate Block From Moved
+Mast**; its exact transform is retained while the saved chain is shortened or
+extended to the nearest segment on that approach.
+
+Generated diamonds run automatically. Railroader's live car locations on the
+four saved approaches request the interlocking, only one route can clear, and
+all three conflicting semaphore signals remain at Stop. The active semaphore
+returns to Stop after the train enters its protected block, while the route
+remains locked through the diamond and releases after the configured clear
+delay. The selected signal panel shows the live state and provides manual
+request/release controls for testing and dispatching. Manual release is
+fail-safe and is refused while the crossing is occupied.
+
+Functional Auto Engineer crossings are written to `grade-crossings.json`
+beside the selected map graph. Distribute the small standalone
+`Hrogers.CrossingRuntime` mod with the map. It does not depend on this editor or
+AI Traffic and applies the crossings to player-owned Waypoint Auto Engineer
+equipment as well as unowned AI trains.
 
 A complete Unity Mod Manager package containing the in-game Geo editor and the
 desktop Tile Editor.
@@ -83,6 +167,14 @@ desktop Tile Editor.
   undoable edit. Release over another cyan node when it turns green to connect
   the dragged node to that target; the dragged node stays at its last valid
   terrain position so the new segment does not collapse to zero length.
+- Right-click anywhere in the world to clear track, Spliney, scenery, pole,
+  base-object, and operations selections. The same gesture cancels pointer
+  placement, node dragging, bridge picking, node/pole connections, Fit Arc
+  chains, measured TrackSpan starts, terrain strokes, and delete confirmation.
+- F9 reserves the mouse for editor selection and placement. Railroader's
+  left-drag pan, right-drag orbit, first-person mouse look, and wheel zoom are
+  disabled while the panel is open; W/A/S/D and the normal fast-movement
+  modifiers remain available for camera travel.
 - Node movement has primary WORLD and LOCAL modes. WORLD follows map axes;
   LOCAL X/Z follows the node's track heading. Movement uses targeted,
   debounced track rebuilding so rapid nudges and Ctrl-drag stay responsive.
@@ -95,15 +187,19 @@ desktop Tile Editor.
   sleep and wake automatically, long segments use fewer pick objects, and
   scenery searches are cached between Unity GUI passes.
 - The scenery asset picker pages through the entire loaded asset catalog
-  instead of showing only the first matches. Search, Previous, and Next work
-  across every identifier reported by Railroader's scenery manager.
+  instead of showing only the first matches. It also discovers RailLoader
+  `SCAssetPacks` that registered after Railroader built its initial identifier
+  list, while filtering out definitions the live manager cannot resolve.
+  Search, Previous, and Next work across the combined catalog.
 - The `OBJECTS` tab edits base-game buildings and props as RailLoader
   mandelas/FUSE scene clones. Click the object itself, refine the chosen
   hierarchy level when needed, then move or rotate it in world/local axes,
   scale it, disable/re-enable it, or clone it beside the source or at the
   mouse pointer. Town, map, and world-scene containers are hard selection
   boundaries, so clicking Bryson Station cannot move the whole scene.
-  Unsafe saved-state objects cannot be cloned.
+  Unsafe saved-state objects cannot be cloned. Thin signs and small props use
+  a modest screen-space picking halo only when normal collider and renderer
+  ray selection misses.
 - Object overrides use parent-local transforms, share the normal in-game
   Undo/Redo and Save Graph workflow, and remain readable by both Strange
   Customs and FUSE.
@@ -149,6 +245,9 @@ desktop Tile Editor.
   in-game camera target. Existing and new objects provide clickable live
   control points with movement, full rotation, point insertion/deletion,
   exact transforms, whole-object deletion, undo/redo, and atomic JSON save.
+  Loaded base-game roads and rivers are included even when they are not listed
+  in the selected mod graph; the first adjustment creates a same-name override
+  and refreshes the affected terrain and mask tiles.
   Roads and rivers expose width and loaded Strange Customs profiles; bridges
   preserve their AutoTrestle curve and expose Block/Bent styles independently
   at both ends.
@@ -157,10 +256,13 @@ desktop Tile Editor.
   have arrow controls, 0.01 through 180 degree steps, Level X/Z, Reset
   Rotation, and Flip Y 180; exact fields remain under `More...`.
 - `Bridge Directly from Track` temporarily exposes the yellow track overlays:
-  click one segment, set the vertical below-rail offset and control-point
-  spacing, then build. The bridge samples Railroader's high-accuracy 3D track
-  curve—including grade, pitch, crests, and sags—and defaults to 0.30 m below
-  the rail with samples every 8 m.
+  click one segment, set the vertical below-rail offset, then build. The
+  bridge uses the TrackSegment's two endpoint positions and rotations, which
+  reproduce the same high-accuracy 3D Bezier span—including grade, pitch,
+  crests, and sags—without redundant intermediate controls. The default deck
+  offset is 0.30 m below the rail. After each build, the new trestle and
+  consumed track selection are cleared and yellow track picking remains armed
+  for the next bridge. Existing trestles also show `Build Another Bridge`.
 - Spliney discovery and overlay attachment are cached. Large maps with many
   AutoTrestles do not rescan and rebuild every panel heartbeat; unresolved
   loader objects use a bounded five-second retry.
@@ -168,7 +270,10 @@ desktop Tile Editor.
   remembered between sessions.
 - While F9 is open, Railroader's normal panel, teleport, and gameplay
   shortcuts are locked so typing in Tile Editor fields does not open unrelated
-  windows. Camera movement and Tile Editor selection remain available.
+  windows. Keyboard camera movement and Tile Editor mouse selection remain
+  available. Hold the middle mouse button to temporarily restore Railroader's
+  normal mouse pan, orbit, and zoom controls. Tile Editor ignores world clicks
+  during the hold and resumes editing as soon as middle mouse is released.
 - The dedicated Terrain tab paints directly under the mouse with a visible
   brush footprint. `Sculpt Terrain` and `Surface Paint` are separate
   workspaces so height editing cannot accidentally change vegetation or
@@ -185,7 +290,9 @@ desktop Tile Editor.
   Lines` makes the pale OSM background nearly transparent while retaining
   stronger roads, rivers, buildings, labels, and boundaries; `Full Map`
   restores the original raster. Alignment uses the same `Map.json`
-  latitude/longitude calibration as the desktop editor.
+  latitude/longitude calibration as the desktop editor. The Terrain controls
+  show OSM cache size and tile count; `Clear Cache` uses a confirmation click
+  before deleting those downloaded tiles.
 - Practical sculpt presets cover building pads, track/road beds, walkways,
   ditches, and embankments. Building Pad holds one sampled elevation for the
   whole stroke; Path/Road removes cross-slope while following the route;

@@ -172,7 +172,8 @@ if ($Deploy) {
         Get-ChildItem -LiteralPath $deployDir -Recurse -File |
             Where-Object {
                 $_.FullName -notmatch '[\\/]\.venv[\\/]' -and
-                $_.FullName -notmatch '[\\/]__pycache__[\\/]'
+                $_.FullName -notmatch '[\\/]__pycache__[\\/]' -and
+                $_.FullName -notmatch '[\\/]Cache[\\/]OSM[\\/]'
             } |
             ForEach-Object {
                 $relative = $_.FullName.Substring($deployDir.Length + 1)
@@ -181,6 +182,25 @@ if ($Deploy) {
                     Split-Path -Parent $target
                 ) -Force | Out-Null
                 Copy-Item -LiteralPath $_.FullName -Destination $target -Force
+            }
+
+        # Retain only the three newest full-mod recovery snapshots.
+        Get-ChildItem -LiteralPath $backupRoot -Directory `
+            -Filter "$packageId-*" -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -Skip 3 |
+            ForEach-Object {
+                $staleBackup = [System.IO.Path]::GetFullPath($_.FullName)
+                $resolvedBackupRoot = [System.IO.Path]::GetFullPath(
+                    $backupRoot).TrimEnd(
+                        [System.IO.Path]::DirectorySeparatorChar)
+                $resolvedBackupPrefix = $resolvedBackupRoot + (
+                    [System.IO.Path]::DirectorySeparatorChar)
+                if ($staleBackup.StartsWith(
+                        $resolvedBackupPrefix,
+                        [System.StringComparison]::OrdinalIgnoreCase)) {
+                    Remove-Item -LiteralPath $staleBackup -Recurse -Force
+                }
             }
     } else {
         New-Item -ItemType Directory -Path $deployDir -Force | Out-Null

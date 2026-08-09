@@ -14,6 +14,8 @@ namespace Hrogers.TileEditorBridge
             Industries,
             Passenger,
             Facilities,
+            Signals,
+            TrainOrders,
             All,
         }
 
@@ -142,13 +144,19 @@ namespace Hrogers.TileEditorBridge
             DrawOperationsToolButton(
                 "Facilities",
                 OperationsTool.Facilities);
+            DrawOperationsToolButton("Signals", OperationsTool.Signals);
+            DrawOperationsToolButton("Orders", OperationsTool.TrainOrders);
             DrawOperationsToolButton("All", OperationsTool.All);
             GUILayout.EndHorizontal();
 
             GUILayout.Space(5f);
             DrawPointerPlacementStatus();
-            DrawOperationsSearchAndList();
-            DrawSelectedOperation();
+            if (_operationsTool != OperationsTool.Signals
+                && _operationsTool != OperationsTool.TrainOrders)
+            {
+                DrawOperationsSearchAndList();
+                DrawSelectedOperation();
+            }
             GUILayout.Space(6f);
 
             switch (_operationsTool)
@@ -167,6 +175,12 @@ namespace Hrogers.TileEditorBridge
                     break;
                 case OperationsTool.Facilities:
                     DrawFacilityBuilder();
+                    break;
+                case OperationsTool.Signals:
+                    DrawOperationsCtcSignals();
+                    break;
+                case OperationsTool.TrainOrders:
+                    DrawOperationsTrainOrders();
                     break;
             }
         }
@@ -1019,6 +1033,10 @@ namespace Hrogers.TileEditorBridge
                     return "Passenger";
                 case OperationsTool.Facilities:
                     return "Facilities";
+                case OperationsTool.Signals:
+                    return "Signals";
+                case OperationsTool.TrainOrders:
+                    return "Train Orders";
                 default:
                     return "All";
             }

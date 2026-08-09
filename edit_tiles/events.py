@@ -293,6 +293,23 @@ class EventsMixin:
             self._adjust_osm_opacity(20)
         elif action == 'osm_opacity_down':
             self._adjust_osm_opacity(-20)
+        elif action == 'osm_clear_cache':
+            if not self.osm_clear_cache_confirm:
+                self.osm_clear_cache_confirm = True
+                self._set_status(
+                    "Click CONFIRM CLEAR to delete downloaded OSM tiles")
+            else:
+                files, size = self.osm.clear_disk_cache()
+                self.osm_clear_cache_confirm = False
+                amount = (
+                    f"{size / (1024 * 1024):.1f} MB"
+                    if size >= 1024 * 1024
+                    else f"{size / 1024:.1f} KB"
+                    if size >= 1024
+                    else f"{size} B"
+                )
+                self._set_status(
+                    f"Cleared {files:,} OSM tiles ({amount})")
         elif action == 'toggle_diff':
             self.toggle_diff()
         elif action == 'toggle_help':

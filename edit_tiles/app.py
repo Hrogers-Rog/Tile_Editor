@@ -197,6 +197,7 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
         self.diff_mode    = False
         # OSM overlay
         self.osm          = OsmOverlay()
+        self.osm_clear_cache_confirm = False
         self.map_origin_lat = GEN_ORIGIN_LAT
         self.map_origin_lon = GEN_ORIGIN_LON
         self.map_tile_dimension_m = GEN_TILE_DIM_M

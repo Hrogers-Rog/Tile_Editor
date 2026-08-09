@@ -80,6 +80,30 @@ namespace Hrogers.TileEditorBridge
                 selected.SafetyMessage,
                 selected.CloneSafe ? _mutedStyle : _offlineStyle);
 
+            if (selected.IsBaseGameSign)
+            {
+                GUILayout.Space(4f);
+                GUILayout.Label("BASE-GAME SIGN", _onlineStyle);
+                if (GUILayout.Button(
+                        selected.Active
+                            ? "SIGN VISIBLE - TURN OFF"
+                            : "SIGN HIDDEN - TURN ON",
+                        GUILayout.Height(34f)))
+                {
+                    RunMandelaAction(
+                        selected.Active
+                            ? "Turned off base-game sign"
+                            : "Turned on base-game sign",
+                        () => _mapEditor.SetSelectedMandelaActive(
+                            !selected.Active));
+                }
+                GUILayout.Label(
+                    "This changes only Railroader's original scene sign and "
+                    + "saves the enabled state as a map override. Loader "
+                    + "scenery signs remain under SCENERY.",
+                    _mutedStyle);
+            }
+
             GUILayout.BeginHorizontal();
             if (GUILayout.Button("Show", GUILayout.Height(29f)))
                 RunMandelaAction(

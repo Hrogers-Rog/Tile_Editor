@@ -570,11 +570,12 @@ class PackageVersionTests(unittest.TestCase):
         self.assertIn('"Add +10 m"', panel_source)
         self.assertIn("_mapEditor.AddNextNode", panel_source)
         self.assertIn(
-            "Quaternion.Euler(rotation)\n"
-            "                           * Vector3.forward\n"
-            "                           * 10f",
+            "+ HorizontalForward(rotation.y) * 10f",
             add_next,
         )
+        self.assertIn("var grade = SelectedNodeGrade();", add_next)
+        self.assertIn("position.y += 10f * grade / 100f;", add_next)
+        self.assertIn("rotation.x = PitchFromGrade(grade);", add_next)
         self.assertIn(
             "var rotation = start.transform.localEulerAngles;",
             add_next,
@@ -752,6 +753,19 @@ class PackageVersionTests(unittest.TestCase):
         self.assertIn("totalMatches = matchCount;", session_source)
         self.assertIn("var page = new List<string>(maximum);", session_source)
         self.assertIn("_cachedScenerySearchResults", session_source)
+        self.assertIn(
+            "DiscoverRailLoaderSceneryIdentifiers()",
+            session_source,
+        )
+        self.assertIn('"SCAssetPacks"', session_source)
+        self.assertIn(
+            "manager.TryGetSceneryDefinition(",
+            session_source,
+        )
+        self.assertIn(
+            "SceneryAssetLibrarySummary",
+            panel_source,
+        )
         self.assertNotIn(
             "SearchSceneryAssets(\n                _scenerySearch,\n"
             "                12)",
@@ -905,7 +919,7 @@ class PackageVersionTests(unittest.TestCase):
         self.assertIn("Bridge / Trestle", panel_source)
         self.assertIn("Delete Entire Spliney...", panel_source)
 
-    def test_in_game_bridge_samples_selected_track_below_rail(self):
+    def test_in_game_bridge_matches_selected_segment_endpoint_nodes(self):
         root = Path(__file__).resolve().parent.parent
         bridge = root / "TileEditorBridge"
         session_source = (
@@ -929,16 +943,27 @@ class PackageVersionTests(unittest.TestCase):
         )
         self.assertIn("PositionAccuracy.High", builder)
         self.assertIn("position.y -= belowRail;", builder)
-        self.assertIn("Mathf.CeilToInt(length / pointSpacing) + 1", builder)
-        self.assertIn("257", builder)
-        self.assertIn("SetSplineTrackPickMode(false);", builder)
+        self.assertIn("for (var index = 0; index < 2; index++)", builder)
+        self.assertIn(
+            "var distance = index == 0 ? 0f : length;",
+            builder,
+        )
+        self.assertNotIn("pointSpacing", builder)
+        self.assertIn("BeginTrackBridgePicking();", builder)
+        self.assertNotIn("SetSplineTrackPickMode(false);", builder)
         self.assertIn("PICK A TRACK SEGMENT...", panel_source)
+        self.assertIn("BUILD ANOTHER BRIDGE...", panel_source)
+        self.assertIn(
+            "_mapEditor.BeginTrackBridgePicking();",
+            panel_source,
+        )
         self.assertIn(
             'private string _trackBridgeBelowRail = "0.30"',
             panel_source,
         )
+        self.assertNotIn("_trackBridgePointSpacing", panel_source)
         self.assertIn(
-            'private string _trackBridgePointSpacing = "8"',
+            "two endpoint nodes",
             panel_source,
         )
         self.assertIn(
@@ -949,6 +974,152 @@ class PackageVersionTests(unittest.TestCase):
             "(!_splineyMode || _splineTrackPickMode)",
             graph_source,
         )
+
+    def test_right_click_universally_clears_editor_state(self):
+        root = Path(__file__).resolve().parent.parent
+        bridge = root / "TileEditorBridge"
+        pointer_source = (
+            bridge / "TileEditorWorldPointer.cs"
+        ).read_text(encoding="utf-8")
+        graph_source = (
+            bridge / "TileEditorGraphSession.cs"
+        ).read_text(encoding="utf-8")
+        panel_source = (
+            bridge / "TileEditorBridgePanel.cs"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(
+            "HandleUniversalDeselectInput();",
+            panel_source,
+        )
+        cancel = pointer_source.split(
+            "private void HandleUniversalDeselectInput()", 1
+        )[1].split(
+            "private bool TryGetPointerSurfaceHit(", 1
+        )[0]
+        self.assertIn("Input.GetMouseButtonDown(1)", cancel)
+        self.assertIn("IsPointerOverEditorWindow()", cancel)
+        self.assertIn("CancelPointerPlacement(false);", cancel)
+        self.assertIn("EndTerrainStroke();", cancel)
+        self.assertIn("_connectStartId = string.Empty;", cancel)
+        self.assertIn("_fitArcNodeIds.Clear();", cancel)
+        self.assertIn("_poleWireStartId = -1;", cancel)
+        self.assertIn(
+            "_opsMarkedSpanStartSegment = string.Empty;",
+            cancel,
+        )
+        self.assertIn("_mapEditor?.ClearAllSelections();", cancel)
+
+        clear = graph_source.split(
+            "internal void ClearAllSelections()", 1
+        )[1].split(
+            "internal bool IsSelected(TrackNode node)", 1
+        )[0]
+        for action in (
+            "CancelNodeDrag();",
+            "ClearTrackSelection();",
+            "ClearSplineSelection();",
+            "ClearSelectedScenery();",
+            "ClearSelectedTelegraphPole();",
+            "ClearSelectedMandela();",
+            'SelectOperation(string.Empty);',
+        ):
+            self.assertIn(action, clear)
+
+    def test_f9_camera_has_middle_mouse_navigation_toggle(self):
+        root = Path(__file__).resolve().parent.parent
+        bridge = root / "TileEditorBridge"
+        camera_source = (
+            bridge / "TileEditorCameraInput.cs"
+        ).read_text(encoding="utf-8")
+        lock_source = (
+            bridge / "TileEditorInputLock.cs"
+        ).read_text(encoding="utf-8")
+        main_source = (
+            bridge / "Main.cs"
+        ).read_text(encoding="utf-8")
+        panel_source = (
+            bridge / "TileEditorBridgePanel.cs"
+        ).read_text(encoding="utf-8")
+        overlay_source = (
+            bridge / "TileEditorOverlays.cs"
+        ).read_text(encoding="utf-8")
+        project_source = (
+            bridge / "Hrogers.TileEditorBridge.csproj"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('Reference Include="0Harmony"', project_source)
+        self.assertIn(
+            'HarmonyPatch(typeof(StrategyCameraController), "UpdateInput")',
+            camera_source,
+        )
+        self.assertIn("GameInput.shared.GetMovement(", camera_source)
+        self.assertIn("____movementInput = new Vector3(", camera_source)
+        self.assertIn("-Input.mouseScrollDelta.y", camera_source)
+        self.assertIn("____angleXInput = 0f;", camera_source)
+        self.assertIn("____angleYInput = movement.y / 5f;", camera_source)
+        self.assertIn("CameraNavigationUnlocked", camera_source)
+        self.assertIn("SetMouseCameraLocked", camera_source)
+        self.assertIn(
+            "Input.GetMouseButtonDown(2)",
+            panel_source,
+        )
+        self.assertIn("ToggleCameraNavigationLock", panel_source)
+        self.assertIn(
+            "TileEditorCameraInput.CameraNavigationUnlocked",
+            panel_source,
+        )
+        self.assertIn(
+            "!TileEditorCameraInput.EditorWorldInputBlocked",
+            overlay_source,
+        )
+        self.assertIn("____panStartPosition = null;", camera_source)
+        self.assertIn("____rotateStarted = false;", camera_source)
+        self.assertIn("selected = false;", camera_source)
+        self.assertIn("TileEditorCameraInput.EditorInputActive =", lock_source)
+        self.assertNotIn(
+            "TileEditorCameraInput.MouseCameraLocked =\n                locked",
+            lock_source,
+        )
+        self.assertIn("_editorWorldInputBlocked", lock_source)
+        allowed = lock_source.split(
+            "EditorAllowedGameActions", 1
+        )[1].split(
+            "private readonly HashSet<InputAction>", 1
+        )[0]
+        self.assertIn('"Move"', allowed)
+        self.assertIn('"LeanLeft"', allowed)
+        self.assertIn('"LeanRight"', allowed)
+        self.assertIn('"ActivatePrimary"', allowed)
+        self.assertNotIn('"ActivateSecondary"', allowed)
+        self.assertIn("_harmony.PatchAll(", main_source)
+        self.assertIn("_harmony?.UnpatchAll(", main_source)
+
+    def test_shift_question_mark_opens_pointer_track_survey(self):
+        root = Path(__file__).resolve().parent.parent
+        bridge = root / "TileEditorBridge"
+        survey_source = (
+            bridge / "TileEditorSurveyHud.cs"
+        ).read_text(encoding="utf-8")
+        panel_source = (
+            bridge / "TileEditorBridgePanel.cs"
+        ).read_text(encoding="utf-8")
+        geo_source = (
+            bridge / "TileEditorGeoPanel.cs"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("Input.GetKey(KeyCode.Slash)", survey_source)
+        self.assertIn("Input.GetKey(KeyCode.LeftShift)", survey_source)
+        self.assertIn("TryGetPointerSurfaceHit", survey_source)
+        self.assertIn("InspectPointerSurvey", survey_source)
+        self.assertIn("TilePositionFromPoint", survey_source)
+        self.assertIn("TryGetLocationFromGamePoint", survey_source)
+        self.assertIn("GradePercent", survey_source)
+        self.assertIn("HeadingDegrees", survey_source)
+        self.assertIn("GraphLocalPosition", survey_source)
+        self.assertIn("UpdateSurveyHud();", panel_source)
+        self.assertIn("DrawSurveyHud();", panel_source)
+        self.assertIn("Shift+? survey", geo_source)
 
     def test_in_game_telegraph_poles_use_cumulative_mover_offsets(self):
         root = Path(__file__).resolve().parent.parent
@@ -1219,6 +1390,33 @@ class PackageVersionTests(unittest.TestCase):
             '"Hrogers.TileEditorBridge.dll.*.cache"',
             packaging,
         )
+        self.assertIn(
+            "'[\\\\/]Cache[\\\\/]OSM[\\\\/]'",
+            packaging,
+        )
+
+    def test_osm_cache_has_guarded_manual_clear_in_both_editors(self):
+        root = Path(__file__).resolve().parent.parent
+        osm_source = (
+            root / "edit_tiles" / "osm.py"
+        ).read_text(encoding="utf-8")
+        events_source = (
+            root / "edit_tiles" / "events.py"
+        ).read_text(encoding="utf-8")
+        renderer_source = (
+            root / "edit_tiles" / "renderer.py"
+        ).read_text(encoding="utf-8")
+        game_source = (
+            root / "TileEditorBridge" / "TileEditorOsmOverlay.cs"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("def clear_disk_cache(self)", osm_source)
+        self.assertIn("self._cache_generation += 1", osm_source)
+        self.assertIn("osm_clear_cache_confirm", events_source)
+        self.assertIn('"CONFIRM CLEAR"', renderer_source)
+        self.assertIn("ClearOsmDiskCache()", game_source)
+        self.assertIn("_osmCacheGeneration++", game_source)
+        self.assertIn('"CONFIRM CLEAR"', game_source)
 
     def test_all_editor_file_types_have_two_way_sync(self):
         root = Path(__file__).resolve().parent.parent
@@ -1548,10 +1746,23 @@ class PackageVersionTests(unittest.TestCase):
         self.assertIn("DrawMandelaPanel();", geo_source)
         self.assertIn("SelectMandelaUnderPointer", session_source)
         self.assertIn("FindObjectsOfTypeAll<Renderer>()", session_source)
+        self.assertIn(
+            "FindSmallMandelaScreenTarget(",
+            session_source,
+        )
+        self.assertIn(
+            "const float pickHalo = 18f;",
+            session_source,
+        )
         self.assertIn("MoveSelectedMandela", session_source)
         self.assertIn("RotateSelectedMandela", session_source)
         self.assertIn("CloneSelectedMandelaAtWorldPosition", session_source)
         self.assertIn("SetSelectedMandelaActive", session_source)
+        self.assertIn("LooksLikeBaseGameSign", session_source)
+        self.assertIn("SceneryAssetInstance", session_source)
+        self.assertIn('"BASE-GAME SIGN"', panel_source)
+        self.assertIn('"SIGN VISIBLE - TURN OFF"', panel_source)
+        self.assertIn('"SIGN HIDDEN - TURN ON"', panel_source)
         self.assertIn('"instantiateFrom"', session_source)
         self.assertIn('["localPosition"]', session_source)
         self.assertIn('["localRotation"]', session_source)
@@ -1929,6 +2140,34 @@ class PackageVersionTests(unittest.TestCase):
         self.assertNotIn(".Count()", search)
         self.assertNotIn(".Skip(", search)
 
+    def test_live_base_roads_and_rivers_get_nodes_and_terrain_updates(self):
+        root = Path(__file__).resolve().parent.parent
+        source = (
+            root / "TileEditorBridge" / "TileEditorSplineySession.cs"
+        ).read_text(encoding="utf-8")
+        panel_source = (
+            root / "TileEditorBridge" / "TileEditorGeoPanel.cs"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("IsLiveMapSource", source)
+        self.assertIn("CaptureLivePathEntry(path)", source)
+        self.assertIn(
+            "foreach (var pair in livePaths)",
+            source,
+        )
+        self.assertIn(
+            "source.LivePath.Rebuild();",
+            source,
+        )
+        self.assertIn(
+            "first edit writes a same-ID override",
+            source,
+        )
+        self.assertIn(
+            "Source: live base-map ",
+            panel_source,
+        )
+
     def test_new_track_nodes_use_persistent_prefix_and_name_pattern(self):
         root = Path(__file__).resolve().parent.parent
         bridge = root / "TileEditorBridge"
@@ -1995,6 +2234,336 @@ class PackageVersionTests(unittest.TestCase):
             )[0],
         )
         self.assertIn("_nodeWindowRect.Contains(guiMouse)", pointer_source)
+
+    def test_f9_precision_track_objects_and_crossings_are_persistent(self):
+        root = Path(__file__).resolve().parent.parent
+        bridge = root / "TileEditorBridge"
+        graph_source = (
+            bridge / "TileEditorGraphSession.cs"
+        ).read_text(encoding="utf-8")
+        pointer_source = (
+            bridge / "TileEditorWorldPointer.cs"
+        ).read_text(encoding="utf-8")
+        geo_source = (
+            bridge / "TileEditorGeoPanel.cs"
+        ).read_text(encoding="utf-8")
+        camera_source = (
+            bridge / "TileEditorCameraInput.cs"
+        ).read_text(encoding="utf-8")
+        backup_source = (
+            bridge / "TileEditorBackupRetention.cs"
+        ).read_text(encoding="utf-8")
+        overrides_source = (
+            bridge / "TileEditorTrackOverrides.cs"
+        ).read_text(encoding="utf-8")
+        crossings_source = (
+            bridge / "TileEditorAutoEngineerCrossings.cs"
+        ).read_text(encoding="utf-8")
+        spline_source = (
+            bridge / "TileEditorSplineySession.cs"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("InjectSelectedSegmentAtPosition", graph_source)
+        self.assertIn("ClosestCurveParameter", graph_source)
+        self.assertIn("PointerPlacementKind.SegmentControlNode", pointer_source)
+        self.assertIn('"INSERT AT MOUSE..."', geo_source)
+        self.assertIn("PointerOverEditorWindow", camera_source)
+        self.assertIn("EditorWorldInputBlocked", camera_source)
+        self.assertIn("MaximumBackups = 3", backup_source)
+        self.assertIn("CreateBumperObject", overrides_source)
+        self.assertIn("CreateBumperMasks", overrides_source)
+        self.assertIn("disabledBumpers", overrides_source)
+        self.assertIn("ToggleSelectedSwitchStand", graph_source)
+        self.assertIn('"grade-crossings.json"', crossings_source)
+        self.assertIn("ReloadPortableCrossingRuntime", crossings_source)
+        self.assertNotIn('"AITraffic"', crossings_source)
+        self.assertIn("bool localAxes", spline_source)
+        self.assertIn("nodeTransformOnly", graph_source)
+
+    def test_standalone_crossing_runtime_serves_all_auto_engineers(self):
+        root = Path(__file__).resolve().parent.parent
+        runtime = root / "CrossingRuntime"
+        registry_source = (
+            runtime / "CrossingRegistry.cs"
+        ).read_text(encoding="utf-8")
+        main_source = (runtime / "Main.cs").read_text(encoding="utf-8")
+        project_source = (
+            runtime / "Hrogers.CrossingRuntime.csproj"
+        ).read_text(encoding="utf-8")
+        editor_crossings = (
+            root / "TileEditorBridge" / "TileEditorAutoEngineerCrossings.cs"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('"grade-crossings.json"', registry_source)
+        self.assertIn("TrackMarkerType.Crossing", registry_source)
+        self.assertIn("graph.SegmentsConnectedTo(node)", registry_source)
+        self.assertIn("foreach (var segment in segments)", registry_source)
+        self.assertIn("public static void ReloadDefinitions()", main_source)
+        self.assertNotIn("AITraffic", project_source)
+        self.assertNotIn("TileEditorBridge", project_source)
+        self.assertNotIn("IsOwnedByPlayer", registry_source)
+        self.assertIn('"grade-crossings.json"', editor_crossings)
+        self.assertNotIn('"traffic.json"', editor_crossings)
+
+    def test_portable_train_signals_use_base_asset_without_editor_runtime(self):
+        root = Path(__file__).resolve().parent.parent
+        runtime = root / "SignalRuntime"
+        registry_source = (
+            runtime / "TrainSignalRegistry.cs"
+        ).read_text(encoding="utf-8")
+        main_source = (runtime / "Main.cs").read_text(encoding="utf-8")
+        project_source = (
+            runtime / "Hrogers.SignalRuntime.csproj"
+        ).read_text(encoding="utf-8")
+        panel_source = (
+            root / "TileEditorBridge" / "TileEditorTrainSignalPanel.cs"
+        ).read_text(encoding="utf-8")
+        session_source = (
+            root / "TileEditorBridge" / "TileEditorTrainSignalSession.cs"
+        ).read_text(encoding="utf-8")
+        pointer_source = (
+            root / "TileEditorBridge" / "TileEditorWorldPointer.cs"
+        ).read_text(encoding="utf-8")
+        geo_panel_source = (
+            root / "TileEditorBridge" / "TileEditorGeoPanel.cs"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('"train-signals.json"', registry_source)
+        self.assertIn("Signal BR-E Main", registry_source)
+        self.assertIn("Signal BR-E Enter", registry_source)
+        self.assertIn("GetComponentsInChildren<CTCSignal>", registry_source)
+        self.assertIn("CTCSignalModelController", registry_source)
+        self.assertIn("controller.Configure(definition.HeadCount)", registry_source)
+        self.assertIn("public static bool TrySetAspect", main_source)
+        self.assertIn("public static bool TryGetSignal", main_source)
+        self.assertNotIn("TileEditorBridge", project_source)
+        self.assertIn('"BASE-GAME SEMAPHORE SIGNALS"', panel_source)
+        self.assertIn('"Interlocking ID"', panel_source)
+        self.assertIn('"Protected node"', panel_source)
+        self.assertIn('"Protected segment"', panel_source)
+        self.assertIn("CreateTrainSignalAtPosition", session_source)
+        self.assertIn("SnapSelectedTrainSignalToTrack", session_source)
+        self.assertIn("SetSelectedTrainSignalTrackLocked", session_source)
+        self.assertIn('"trackAttachment"', session_source)
+        self.assertIn("TrackLocalPosition", session_source)
+        self.assertIn('"Snap to track"', panel_source)
+        self.assertIn('"Keep locked"', panel_source)
+        self.assertIn('"SNAP ONCE"', panel_source)
+        self.assertIn('"SNAP + LOCK"', panel_source)
+        self.assertIn("RefreshAttachedSignalTransforms", registry_source)
+        self.assertIn('entry["trackAttachment"]', registry_source)
+        self.assertIn("BuildDiamondInterlocking", session_source)
+        self.assertIn("CalculateDiamondCrossing", session_source)
+        self.assertIn("TryLineIntersectionXZ", session_source)
+        self.assertIn("TraceDiamondApproach", session_source)
+        self.assertIn("ChooseDiamondContinuation", session_source)
+        self.assertIn('"protectedSegmentIds"', session_source)
+        self.assertIn('"approachSegmentIds"', session_source)
+        self.assertIn('"segmentIds"', session_source)
+        self.assertIn("signalSetback > 5000f", session_source)
+        self.assertIn('_diamondSignalSetback = "600"', panel_source)
+        self.assertIn('"BUILD 4 INDEPENDENT SIGNALS"', panel_source)
+        self.assertIn("Main.Interlockings", (
+            runtime / "README.md"
+        ).read_text(encoding="utf-8"))
+        self.assertIn("PlacedDiamondInterlocking", main_source)
+        self.assertIn("ProtectedSegmentIds", main_source)
+        self.assertIn("ApproachSegmentIds", main_source)
+        self.assertIn("SegmentIds", main_source)
+        self.assertIn("ReloadStandaloneSignalRuntime", session_source)
+        self.assertIn("RecalculateSelectedTrainSignalRoute", session_source)
+        self.assertIn(
+            "SelectedTrainSignalInterlockingStatus",
+            session_source,
+        )
+        self.assertIn(
+            '"RECALCULATE BLOCK FROM MOVED MAST"',
+            panel_source,
+        )
+        self.assertIn('"LIVE INTERLOCK CONTROL"', panel_source)
+        self.assertIn(
+            "RequestSelectedTrainSignalInterlockingRoute",
+            panel_source,
+        )
+        self.assertIn(
+            "ReleaseSelectedTrainSignalInterlocking",
+            panel_source,
+        )
+        self.assertIn("PointerPlacementKind.TrainSignal", pointer_source)
+        self.assertIn("DrawTrainSignalChangeBar", geo_panel_source)
+        self.assertIn('"Undo Signals ("', geo_panel_source)
+        self.assertIn('"Redo Signals ("', geo_panel_source)
+        self.assertIn('"Signals Auto-Saved"', geo_panel_source)
+        self.assertIn("TrainSignalUndoCount", session_source)
+        self.assertIn("TrainSignalRedoCount", session_source)
+        self.assertNotIn('GUILayout.Button("Undo Signal")', panel_source)
+
+        interlock_source = (
+            runtime / "DiamondInterlockingRuntime.cs"
+        ).read_text(encoding="utf-8")
+        self.assertIn("TrainController.Shared", interlock_source)
+        self.assertIn("car.WheelBoundsF", interlock_source)
+        self.assertIn("car.WheelBoundsR", interlock_source)
+        self.assertIn("location.GetPosition()", interlock_source)
+        self.assertIn("interlocking.ReleaseLength", interlock_source)
+        self.assertIn("Only", (
+            runtime / "README.md"
+        ).read_text(encoding="utf-8"))
+        self.assertIn(
+            "public static bool TryRequestInterlockingRoute",
+            main_source,
+        )
+        self.assertIn(
+            "public static bool TryReleaseInterlocking",
+            main_source,
+        )
+        self.assertIn(
+            "public static bool TrySetInterlockingAutomatic",
+            main_source,
+        )
+        self.assertIn("DiamondInterlockingRuntime", registry_source)
+        self.assertIn(
+            "_interlockingRuntime.Tick(_interlockings, _signals)",
+            registry_source,
+        )
+
+    def test_period_ctc_abs_and_train_orders_share_a_portable_model(self):
+        root = Path(__file__).resolve().parent.parent
+        bridge = root / "TileEditorBridge"
+        runtime = root / "SignalRuntime"
+        session_source = (
+            bridge / "TileEditorCtcSession.cs"
+        ).read_text(encoding="utf-8")
+        panel_source = (
+            bridge / "TileEditorCtcPanel.cs"
+        ).read_text(encoding="utf-8")
+        operations_source = (
+            bridge / "TileEditorOperationsPanel.cs"
+        ).read_text(encoding="utf-8")
+        graph_source = (
+            bridge / "TileEditorGraphSession.cs"
+        ).read_text(encoding="utf-8")
+        runtime_source = (
+            runtime / "PortableCtcRuntime.cs"
+        ).read_text(encoding="utf-8")
+        registry_source = (
+            runtime / "TrainSignalRegistry.cs"
+        ).read_text(encoding="utf-8")
+        main_source = (runtime / "Main.cs").read_text(encoding="utf-8")
+
+        self.assertIn('"ctc-system.json"', session_source)
+        self.assertIn("CreateCtcControlPointFromSelectedNode", session_source)
+        self.assertIn("CreateCtcBlockFromSelectedSegment", session_source)
+        self.assertIn("AddSelectedSegmentToCtcBlock", session_source)
+        self.assertIn("CreateTrainOrder", session_source)
+        self.assertIn('"Form 31"', panel_source)
+        self.assertIn('"train-orders", "abs", "ctc"', session_source)
+        self.assertIn("ResetCtcSession();", graph_source)
+        self.assertIn("DisposeCtcSession();", graph_source)
+        self.assertIn("OperationsTool.Signals", operations_source)
+        self.assertIn("OperationsTool.TrainOrders", operations_source)
+        self.assertIn('"TERRITORY PREVIEW / SELECT CONTROL POINT"', panel_source)
+        self.assertIn('"ABS / CTC BLOCKS"', panel_source)
+        self.assertIn('"TIMETABLE & TRAIN ORDER AUTHORING"', panel_source)
+        self.assertIn('"FORM 19"', panel_source)
+        self.assertIn('"FORM 31"', panel_source)
+
+        self.assertIn('"ctc-system.json"', runtime_source)
+        self.assertIn("controller.CanSetSwitch", runtime_source)
+        self.assertIn("StateManager.ApplyLocal(new SetSwitch", runtime_source)
+        self.assertIn("StopControlPointSignals", runtime_source)
+        self.assertIn('return "approach";', runtime_source)
+        self.assertIn('return "clear";', runtime_source)
+        self.assertIn("BlocksFor(route).Any", runtime_source)
+        self.assertIn("correspondence", runtime_source.lower())
+        self.assertIn("_ctcRuntime.Tick", registry_source)
+        self.assertIn("public static bool TrySetCtcSwitch", main_source)
+        self.assertIn("public static bool TryLineCtcRoute", main_source)
+        self.assertIn("public static bool TryCancelCtcRoute", main_source)
+        self.assertIn("IReadOnlyList<PlacedTrainOrder>", main_source)
+
+    def test_train_order_delivery_ack_authority_and_multiplayer_sync(self):
+        root = Path(__file__).resolve().parent.parent
+        bridge = root / "TileEditorBridge"
+        runtime = root / "SignalRuntime"
+        order_runtime = (
+            runtime / "TrainOrderRuntime.cs"
+        ).read_text(encoding="utf-8")
+        ctc_sync = (
+            runtime / "CtcMultiplayerSync.cs"
+        ).read_text(encoding="utf-8")
+        main_source = (runtime / "Main.cs").read_text(encoding="utf-8")
+        panel_source = (
+            bridge / "TileEditorCtcPanel.cs"
+        ).read_text(encoding="utf-8")
+        session_source = (
+            bridge / "TileEditorCtcSession.cs"
+        ).read_text(encoding="utf-8")
+        schema = json.loads(
+            (runtime / "ctc-system.schema.json").read_text(encoding="utf-8")
+        )
+
+        self.assertIn("RegisterPropertyObject", order_runtime)
+        self.assertIn("AuthorizationRequirement.PlayerIdKey", order_runtime)
+        self.assertIn("AccessLevel.Dispatcher", order_runtime)
+        self.assertIn("MemberPlayerIds.Contains(playerId)", order_runtime)
+        self.assertIn('order.Status = "Delivered"', order_runtime)
+        self.assertIn('order.Status = "Acknowledged"', order_runtime)
+        self.assertIn("EnforceMovementAuthorities", order_runtime)
+        self.assertIn('"aiManualStopDistance"', order_runtime)
+        self.assertIn("PropertyChange.Control.TrainBrake", order_runtime)
+        self.assertIn('locomotive.KeyValueObject["aiOrders"]', order_runtime)
+        self.assertIn("Input.GetKeyDown(KeyCode.F8)", order_runtime)
+        self.assertIn("TryDeliverTrainOrder", main_source)
+        self.assertIn("TryAcknowledgeTrainOrder", main_source)
+        self.assertIn("Company > Operations > Train", panel_source)
+        self.assertNotIn('GUILayout.Button("DELIVER TO CREW")', panel_source)
+        self.assertNotIn('GUILayout.Button("CREW ACKNOWLEDGE")', panel_source)
+        self.assertIn('"authority"', session_source)
+        self.assertIn("RegisterPropertyObject", ctc_sync)
+        self.assertIn("AccessLevel.Dispatcher", ctc_sync)
+        self.assertIn("AuthorizationRequirement.PlayerIdKey", ctc_sync)
+        self.assertIn("ApplyClientState", ctc_sync)
+
+        order_properties = schema["properties"]["trainOrders"]["items"][
+            "properties"
+        ]
+        self.assertIn("Delivered", order_properties["status"]["enum"])
+        self.assertIn("Acknowledged", order_properties["status"]["enum"])
+        self.assertIn("authority", order_properties)
+        self.assertIn(
+            "blockIds", order_properties["authority"]["properties"]
+        )
+
+    def test_signal_desk_joins_native_company_operations_window(self):
+        root = Path(__file__).resolve().parent.parent
+        runtime = root / "SignalRuntime"
+        native_panel = (
+            runtime / "NativeOperationsPanel.cs"
+        ).read_text(encoding="utf-8")
+        main_source = (runtime / "Main.cs").read_text(encoding="utf-8")
+        project_source = (
+            runtime / "Hrogers.SignalRuntime.csproj"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(
+            "HarmonyPatch(typeof(TabView), nameof(TabView.FinishedAddingTabs))",
+            native_panel,
+        )
+        self.assertIn('HarmonyAfter("com.hrogers.aitraffic")', native_panel)
+        self.assertIn("GetComponentInParent<CompanyWindow>()", native_panel)
+        self.assertIn('"Operations"', native_panel)
+        self.assertIn('"Traffic Control"', native_panel)
+        self.assertIn('"Signals & CTC"', native_panel)
+        self.assertIn('"Train Orders"', native_panel)
+        self.assertIn('"My Orders"', native_panel)
+        self.assertIn("Main.TryLineCtcRoute", native_panel)
+        self.assertIn("Main.TrySetCtcSwitch", native_panel)
+        self.assertIn("Main.TryDeliverTrainOrder", native_panel)
+        self.assertIn("Main.TryAcknowledgeTrainOrder", native_panel)
+        self.assertIn("AccessLevel.Dispatcher", native_panel)
+        self.assertIn("new Harmony(entry.Info.Id)", main_source)
+        self.assertIn('<Reference Include="0Harmony">', project_source)
 
 
 if __name__ == "__main__":

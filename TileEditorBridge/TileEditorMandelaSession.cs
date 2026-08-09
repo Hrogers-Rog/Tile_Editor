@@ -22,6 +22,7 @@ namespace Hrogers.TileEditorBridge
             internal Vector3 LocalScale;
             internal bool Active;
             internal bool IsClone;
+            internal bool IsBaseGameSign;
             internal bool CloneSafe;
             internal string SafetyMessage = string.Empty;
         }
@@ -64,6 +65,11 @@ namespace Hrogers.TileEditorBridge
                     LocalScale = selected.transform.localScale,
                     Active = selected.activeSelf,
                     IsClone = !string.IsNullOrWhiteSpace(sourcePath),
+                    IsBaseGameSign =
+                        string.IsNullOrWhiteSpace(sourcePath)
+                        && LooksLikeBaseGameSign(
+                            selected,
+                            _selectedMandelaPath),
                     CloneSafe = safe,
                     SafetyMessage = safetyMessage,
                 };
@@ -803,8 +809,9 @@ namespace Hrogers.TileEditorBridge
             if (nearest != null)
                 return nearest;
 
-            foreach (var renderer in Resources
-                         .FindObjectsOfTypeAll<Renderer>())
+            var renderers = Resources
+                .FindObjectsOfTypeAll<Renderer>();
+            foreach (var renderer in renderers)
             {
                 if (renderer == null
                     || !renderer.enabled
@@ -822,7 +829,141 @@ namespace Hrogers.TileEditorBridge
                 nearest = renderer.transform;
                 nearestDistance = distance;
             }
-            return nearest;
+            if (nearest != null)
+                return nearest;
+
+            // Thin signs and small props often have no collider, and their
+            // renderer bounds can be only a pixel or two wide at normal edit
+            // distances. Use a small screen-space halo only after both
+            // physics and exact renderer-ray picking miss.
+            return FindSmallMandelaScreenTarget(
+                renderers,
+                Input.mousePosition);
+        }
+
+        private static Transform FindSmallMandelaScreenTarget(
+            IEnumerable<Renderer> renderers,
+            Vector3 pointer)
+        {
+            var camera = Camera.main;
+            if (camera == null || renderers == null)
+                return null;
+
+            Transform best = null;
+            var bestScore = float.PositiveInfinity;
+            var pointer2 = new Vector2(pointer.x, pointer.y);
+            foreach (var renderer in renderers)
+            {
+                if (renderer == null
+                    || !renderer.enabled
+                    || !renderer.gameObject.activeInHierarchy
+                    || !renderer.gameObject.scene.IsValid()
+                    || !IsMandelaSelectable(renderer.transform)
+                    || IsUnsafeMandelaSelection(
+                        renderer.transform,
+                        out _))
+                {
+                    continue;
+                }
+
+                var bounds = renderer.bounds;
+                // This fallback is intentionally for signs and props, not
+                // buildings or shared scenery groups.
+                if (MaxBoundsDimension(bounds) > 20f
+                    || !TryProjectMandelaBounds(
+                        camera,
+                        bounds,
+                        out var screenBounds,
+                        out var depth))
+                {
+                    continue;
+                }
+
+                const float pickHalo = 18f;
+                screenBounds.xMin -= pickHalo;
+                screenBounds.xMax += pickHalo;
+                screenBounds.yMin -= pickHalo;
+                screenBounds.yMax += pickHalo;
+                if (!screenBounds.Contains(pointer2))
+                    continue;
+
+                var center = screenBounds.center;
+                var centerDistance =
+                    Vector2.Distance(pointer2, center);
+                var visibleSize = Mathf.Max(
+                    8f,
+                    Mathf.Max(
+                        screenBounds.width,
+                        screenBounds.height));
+                var score =
+                    centerDistance / visibleSize
+                    + depth * 0.00001f;
+                if (score >= bestScore)
+                    continue;
+                best = renderer.transform;
+                bestScore = score;
+            }
+            return best;
+        }
+
+        private static bool TryProjectMandelaBounds(
+            Camera camera,
+            Bounds bounds,
+            out Rect screenBounds,
+            out float depth)
+        {
+            screenBounds = default;
+            depth = float.PositiveInfinity;
+            var center = camera.WorldToScreenPoint(bounds.center);
+            if (center.z <= 0f)
+                return false;
+            depth = center.z;
+
+            var minimum = new Vector2(
+                float.PositiveInfinity,
+                float.PositiveInfinity);
+            var maximum = new Vector2(
+                float.NegativeInfinity,
+                float.NegativeInfinity);
+            var found = false;
+            for (var x = -1; x <= 1; x += 2)
+            {
+                for (var y = -1; y <= 1; y += 2)
+                {
+                    for (var z = -1; z <= 1; z += 2)
+                    {
+                        var corner = bounds.center
+                                     + Vector3.Scale(
+                                         bounds.extents,
+                                         new Vector3(x, y, z));
+                        var screen =
+                            camera.WorldToScreenPoint(corner);
+                        if (screen.z <= 0f)
+                            continue;
+                        minimum.x = Mathf.Min(
+                            minimum.x,
+                            screen.x);
+                        minimum.y = Mathf.Min(
+                            minimum.y,
+                            screen.y);
+                        maximum.x = Mathf.Max(
+                            maximum.x,
+                            screen.x);
+                        maximum.y = Mathf.Max(
+                            maximum.y,
+                            screen.y);
+                        found = true;
+                    }
+                }
+            }
+            if (!found)
+                return false;
+            screenBounds = Rect.MinMaxRect(
+                minimum.x,
+                minimum.y,
+                maximum.x,
+                maximum.y);
+            return true;
         }
 
         private static bool IsMandelaSelectable(Transform target)
@@ -1059,6 +1200,32 @@ namespace Hrogers.TileEditorBridge
                    || name == "props"
                    || name == "vegetation"
                    || name == "interactive scenery";
+        }
+
+        private static bool LooksLikeBaseGameSign(
+            GameObject target,
+            string path)
+        {
+            if (target == null
+                || target.GetComponentInParent<SceneryAssetInstance>()
+                != null)
+            {
+                return false;
+            }
+            var text = ((path ?? string.Empty) + "/" + target.name)
+                .Replace('_', ' ')
+                .Replace('-', ' ')
+                .ToLowerInvariant();
+            return text.Contains("sign")
+                   || text.Contains("crossbuck")
+                   || text.Contains("milepost")
+                   || text.Contains("mile post")
+                   || text.Contains("whistlepost")
+                   || text.Contains("whistle post")
+                   || text.Contains("speedboard")
+                   || text.Contains("speed board")
+                   || text.Contains("station board")
+                   || text.Contains("road marker");
         }
 
         private static bool HasComponentNamed(

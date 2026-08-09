@@ -13,6 +13,7 @@ namespace Hrogers.TileEditorBridge
         {
             Geo,
             Scenery,
+            Signals,
             Objects,
             Poles,
             Terrain,
@@ -83,6 +84,7 @@ namespace Hrogers.TileEditorBridge
         private string _splineSelectionKey = string.Empty;
         private float _splineMoveStep = 1f;
         private float _splineRotationStep = 5f;
+        private bool _splineMoveLocalAxes;
         private bool _showAdvancedSplineControls;
         private int _newSplineKind;
         private string _newSplineName = string.Empty;
@@ -93,7 +95,6 @@ namespace Hrogers.TileEditorBridge
         private int _newSplineTailStyle;
         private string _trackBridgeName = string.Empty;
         private string _trackBridgeBelowRail = "0.30";
-        private string _trackBridgePointSpacing = "8";
         private int _trackBridgeHeadStyle;
         private int _trackBridgeTailStyle;
         private string _nodePositionX = "0";
@@ -127,22 +128,25 @@ namespace Hrogers.TileEditorBridge
             GUILayout.BeginVertical();
             DrawPanelHeader();
             _mapEditor?.SetWorkspaceMode(
-                _panelTab == PanelTab.Geo,
+                _panelTab == PanelTab.Geo
+                || _panelTab == PanelTab.Signals,
                 _panelTab == PanelTab.Scenery,
                 _panelTab == PanelTab.Poles,
                 _panelTab == PanelTab.Geo
                 && _geoTool == GeoTool.Spliney,
-                _panelTab == PanelTab.Objects);
+                _panelTab == PanelTab.Objects,
+                _panelTab == PanelTab.Signals);
             _mapEditor?.SetOperationsMode(
                 _panelTab == PanelTab.Operations);
 
             GUILayout.BeginHorizontal();
             DrawPanelTab("GEO", PanelTab.Geo);
             DrawPanelTab("SCENERY", PanelTab.Scenery);
+            DrawPanelTab("SIGNALS", PanelTab.Signals);
             DrawPanelTab("OPERATIONS", PanelTab.Operations);
-            DrawPanelTab("OBJECTS", PanelTab.Objects);
             GUILayout.EndHorizontal();
             GUILayout.BeginHorizontal();
+            DrawPanelTab("OBJECTS", PanelTab.Objects);
             DrawPanelTab("POLES", PanelTab.Poles);
             DrawPanelTab("TERRAIN", PanelTab.Terrain);
             DrawPanelTab("DESKTOP", PanelTab.Desktop);
@@ -181,6 +185,9 @@ namespace Hrogers.TileEditorBridge
                     case PanelTab.Scenery:
                         DrawSceneryPanel();
                         break;
+                    case PanelTab.Signals:
+                        DrawTrainSignalPanel();
+                        break;
                     case PanelTab.Objects:
                         DrawMandelaPanel();
                         break;
@@ -206,9 +213,15 @@ namespace Hrogers.TileEditorBridge
                 && _mapEditor.Available
                 && _mapEditor.GraphOpen)
             {
-                DrawNativeChangeBar();
+                if (_panelTab == PanelTab.Signals)
+                    DrawTrainSignalChangeBar();
+                else
+                    DrawNativeChangeBar();
             }
 
+            GUILayout.Label(
+                "MMB toggles camera  |  LOCKED: WASD / wheel / Q E  |  Shift+? survey  |  Right-click clears",
+                _mutedStyle);
             GUILayout.Label(Shorten(_lastPanelMessage, 72), _mutedStyle);
             GUI.DragWindow(new Rect(0f, 0f, _windowRect.width - 42f, 28f));
             GUILayout.EndVertical();
@@ -324,6 +337,8 @@ namespace Hrogers.TileEditorBridge
                     : graphOpen
                     ? _panelTab == PanelTab.Scenery
                         ? "LIVE SCENERY - CLICK CYAN MARKERS"
+                        : _panelTab == PanelTab.Signals
+                            ? "LIVE TRAIN SIGNALS - CLICK AMBER MASTS"
                         : _panelTab == PanelTab.Objects
                             ? "LIVE OBJECTS - CLICK BASE-GAME OBJECTS"
                         : _panelTab == PanelTab.Poles
@@ -338,6 +353,20 @@ namespace Hrogers.TileEditorBridge
                     ? _onlineStyle
                     : _offlineStyle);
             GUILayout.FlexibleSpace();
+            var oldColor = GUI.backgroundColor;
+            GUI.backgroundColor = TileEditorCameraInput.MouseCameraLocked
+                ? new Color(0.16f, 0.70f, 0.76f)
+                : new Color(0.48f, 0.50f, 0.54f);
+            if (GUILayout.Button(
+                    TileEditorCameraInput.MouseCameraLocked
+                        ? "CAMERA LOCKED"
+                        : "CAMERA FREE",
+                    GUILayout.Width(112f),
+                    GUILayout.Height(22f)))
+            {
+                ToggleCameraNavigationLock();
+            }
+            GUI.backgroundColor = oldColor;
             if (GUILayout.Button("X", GUILayout.Width(28f), GUILayout.Height(22f)))
                 SetVisible(false);
             GUILayout.EndHorizontal();
@@ -1185,6 +1214,64 @@ namespace Hrogers.TileEditorBridge
                     "Flipped selected node",
                     _mapEditor.FlipSelectedNode);
             GUILayout.EndHorizontal();
+            if (node.ConnectedSegments >= 3)
+            {
+                if (GUILayout.Button(
+                        "FLIP TURNOUT STAND  (currently "
+                        + (node.FlipSwitchStand ? "FLIPPED" : "NORMAL")
+                        + ")",
+                        GUILayout.Height(30f)))
+                {
+                    RunNodeTransformAction(
+                        "Flipped turnout stand",
+                        _mapEditor.ToggleSelectedSwitchStand);
+                }
+            }
+            if (node.ConnectedSegments == 1)
+            {
+                var bumperEnabled =
+                    _mapEditor.SelectedNodeBumperEnabled;
+                if (GUILayout.Button(
+                        "END-OF-TRACK BUMPER: "
+                        + (bumperEnabled ? "ON" : "OFF")
+                        + "  (click to toggle)",
+                        GUILayout.Height(30f)))
+                {
+                    RunGameAction(
+                        bumperEnabled
+                            ? "Turned off end-of-track bumper"
+                            : "Turned on end-of-track bumper",
+                        _mapEditor.ToggleSelectedTrackBumper);
+                }
+            }
+            GUI.enabled = _mapEditor.AutoEngineerCrossingsAvailable
+                          && node.ConnectedSegments > 0;
+            var crossingEnabled =
+                _mapEditor.SelectedNodeIsAutoEngineerCrossing;
+            if (GUILayout.Button(
+                    "AUTO ENGINEER CROSSING: "
+                    + (crossingEnabled ? "MARKED" : "NOT MARKED")
+                    + "  (click to toggle)",
+                    GUILayout.Height(30f)))
+            {
+                RunGameAction(
+                    crossingEnabled
+                        ? "Removed Auto Engineer crossing marker"
+                        : "Added Auto Engineer crossing marker",
+                    _mapEditor.ToggleSelectedAutoEngineerCrossing);
+            }
+            GUI.enabled = true;
+            GUILayout.Label(
+                _mapEditor.CrossingRuntimeLoaded
+                    ? "Saved to the map's portable grade-crossings.json. "
+                      + "The standalone Crossing Runtime reloaded it for all "
+                      + "native Auto Engineer trains, including player-owned "
+                      + "Waypoint equipment."
+                    : "Saved portably beside the map graph. Install Hrogers "
+                      + "Grade Crossing Runtime on players' computers for "
+                      + "functional bell/horn behavior; the Tile Editor is "
+                      + "not required after authoring.",
+                _mutedStyle);
             DrawPointerPlacementStatus();
 
             GUILayout.BeginHorizontal();
@@ -1748,13 +1835,26 @@ namespace Hrogers.TileEditorBridge
             SyncSegmentGroupEditor(segment);
             GUILayout.Label("Track segment", _titleStyle);
             GUILayout.BeginHorizontal();
-            if (GUILayout.Button("Inject Control Node", GUILayout.Height(32f)))
+            if (GUILayout.Button("INSERT AT MOUSE...", GUILayout.Height(32f)))
+            {
+                ArmPointerPlacement(
+                    PointerPlacementKind.SegmentControlNode,
+                    segment.Id,
+                    false);
+            }
+            if (GUILayout.Button("MIDPOINT", GUILayout.Height(32f)))
                 RunGameAction(
                     "Injected a node at segment midpoint",
                     _mapEditor.InjectSelectedSegment);
             if (GUILayout.Button("Show", GUILayout.Height(32f)))
                 RunGameAction("Centered selected track", _mapEditor.ShowSelected);
             GUILayout.EndHorizontal();
+            GUILayout.Label(
+                "Insert at Mouse projects your click onto the selected "
+                + "Bezier track, preserving both halves of the original "
+                + "segment.",
+                _mutedStyle);
+            DrawPointerPlacementStatus();
 
             GUILayout.Space(5f);
             GUILayout.Label(
@@ -2252,7 +2352,13 @@ namespace Hrogers.TileEditorBridge
                         enable
                             ? "Click a yellow track segment for the bridge"
                             : "Stopped track picking",
-                        () => _mapEditor.SetSplineTrackPickMode(enable));
+                        () =>
+                        {
+                            if (enable)
+                                _mapEditor.BeginTrackBridgePicking();
+                            else
+                                _mapEditor.SetSplineTrackPickMode(false);
+                        });
                 }
                 GUI.backgroundColor = pickColor;
 
@@ -2275,13 +2381,11 @@ namespace Hrogers.TileEditorBridge
                     DrawTextField(
                         "Below rail (m)",
                         ref _trackBridgeBelowRail);
-                    DrawTextField(
-                        "Control point spacing (m)",
-                        ref _trackBridgePointSpacing);
                     GUILayout.Label(
                         "A 0.30 m offset places the bridge deck just below "
-                        + "the rail. Smaller spacing follows tight curves "
-                        + "more closely.",
+                        + "the rail. The two trestle controls match the "
+                        + "selected track segment's two endpoint nodes, so "
+                        + "both use the same Bezier shape.",
                         _mutedStyle);
                     GUILayout.BeginHorizontal();
                     GUILayout.Label("Start", GUILayout.Width(48f));
@@ -2312,9 +2416,6 @@ namespace Hrogers.TileEditorBridge
                                     ParseFloat(
                                         _trackBridgeBelowRail,
                                         "below-rail offset"),
-                                    ParseFloat(
-                                        _trackBridgePointSpacing,
-                                        "bridge point spacing"),
                                     _trackBridgeHeadStyle == 0
                                         ? "Block"
                                         : "Bent",
@@ -2436,11 +2537,30 @@ namespace Hrogers.TileEditorBridge
 
             SyncSplineFields(point, false);
             GUILayout.BeginHorizontal();
-            if (GUILayout.Button("New...", GUILayout.Width(70f), GUILayout.Height(29f)))
+            var buildAnotherBridge =
+                string.Equals(
+                    point.Kind,
+                    "Trestle",
+                    StringComparison.OrdinalIgnoreCase);
+            if (GUILayout.Button(
+                    buildAnotherBridge
+                        ? "BUILD ANOTHER BRIDGE..."
+                        : "DONE / NEW SPLINEY...",
+                    GUILayout.Width(
+                        buildAnotherBridge ? 174f : 145f),
+                    GUILayout.Height(29f)))
             {
                 RunSplineAction(
-                    "Ready to place a new spliney",
-                    _mapEditor.ClearSplineSelection);
+                    buildAnotherBridge
+                        ? "Click another yellow track segment"
+                        : "Ready to place a new spliney",
+                    () =>
+                    {
+                        if (buildAnotherBridge)
+                            _mapEditor.BeginTrackBridgePicking();
+                        else
+                            _mapEditor.ClearSplineSelection();
+                    });
             }
             GUI.enabled = point.Index > 0;
             if (GUILayout.Button("Previous Point", GUILayout.Height(29f)))
@@ -2537,6 +2657,9 @@ namespace Hrogers.TileEditorBridge
 
             GUILayout.Space(6f);
             var deleteKey = "spline:" + point.Id;
+            var splineDeleteEnabled = GUI.enabled;
+            GUI.enabled =
+                splineDeleteEnabled && !point.IsLiveMapSource;
             if (string.Equals(
                     _deleteConfirmId,
                     deleteKey,
@@ -2569,11 +2692,26 @@ namespace Hrogers.TileEditorBridge
             {
                 _deleteConfirmId = deleteKey;
             }
+            GUI.enabled = splineDeleteEnabled;
+            if (point.IsLiveMapSource)
+            {
+                GUILayout.Label(
+                    "Base-map roads and rivers can be reshaped but not "
+                    + "deleted from an add-on graph.",
+                    _mutedStyle);
+            }
 
             DrawSplineyChangeBar();
             GUILayout.Label(
-                "Source: " + point.FileName
-                + "   Live geometry rebuilds after every adjustment.",
+                point.IsLiveMapSource
+                    ? "Source: live base-map "
+                      + point.Kind.ToLowerInvariant()
+                      + ". The first edit saves a same-name override into "
+                      + "the selected graph. Geometry and affected terrain "
+                      + "tiles rebuild after every adjustment."
+                    : "Source: " + point.FileName
+                      + "   Live geometry and affected terrain rebuild "
+                      + "after every adjustment.",
                 _mutedStyle);
         }
 
@@ -2635,13 +2773,22 @@ namespace Hrogers.TileEditorBridge
 
         private void DrawPrimarySplineMoveControls()
         {
+            GUILayout.BeginHorizontal();
             GUILayout.Label(
                 "MOVE   Step "
                 + _splineMoveStep.ToString(
                     "0.##",
                     CultureInfo.InvariantCulture)
-                + " m   WORLD",
+                + " m",
                 _titleStyle);
+            GUILayout.FlexibleSpace();
+            DrawWorldLocalAxesButtons(ref _splineMoveLocalAxes);
+            GUILayout.EndHorizontal();
+            GUILayout.Label(
+                _splineMoveLocalAxes
+                    ? "Local X/Z follows the control point heading. Y remains elevation."
+                    : "World X/Y/Z follows the map coordinate axes.",
+                _mutedStyle);
             GUILayout.BeginHorizontal();
             DrawQuickStepButton("0.01", 0.01f, ref _splineMoveStep);
             DrawQuickStepButton("0.1", 0.1f, ref _splineMoveStep);
@@ -2818,7 +2965,9 @@ namespace Hrogers.TileEditorBridge
             {
                 RunSplineAction(
                     "Moved spline control point",
-                    () => _mapEditor.MoveSelectedSplinePoint(offset));
+                    () => _mapEditor.MoveSelectedSplinePoint(
+                        offset,
+                        _splineMoveLocalAxes));
             }
         }
 
@@ -3414,6 +3563,38 @@ namespace Hrogers.TileEditorBridge
                     _mapEditor.Dirty ? "Save Graph *" : "Save Graph",
                     GUILayout.Height(30f)))
                 SaveGraphAndSyncDesktop();
+            GUILayout.EndHorizontal();
+        }
+
+        private void DrawTrainSignalChangeBar()
+        {
+            GUILayout.Space(3f);
+            GUILayout.BeginHorizontal();
+            GUI.enabled = _mapEditor.CanUndoTrainSignal;
+            if (GUILayout.Button(
+                    "Undo Signals (" + _mapEditor.TrainSignalUndoCount + ")",
+                    GUILayout.Height(30f)))
+            {
+                RunGameAction(
+                    "Undid last signal edit",
+                    _mapEditor.UndoTrainSignal);
+                _trainSignalSelectionKey = string.Empty;
+            }
+            GUI.enabled = _mapEditor.CanRedoTrainSignal;
+            if (GUILayout.Button(
+                    "Redo Signals (" + _mapEditor.TrainSignalRedoCount + ")",
+                    GUILayout.Height(30f)))
+            {
+                RunGameAction(
+                    "Redid last signal edit",
+                    _mapEditor.RedoTrainSignal);
+                _trainSignalSelectionKey = string.Empty;
+            }
+            GUI.enabled = false;
+            GUILayout.Button(
+                "Signals Auto-Saved",
+                GUILayout.Height(30f));
+            GUI.enabled = true;
             GUILayout.EndHorizontal();
         }
 

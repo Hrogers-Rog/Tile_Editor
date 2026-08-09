@@ -2,6 +2,24 @@
 
 A Python-based terrain and map editor for **Railroader** mods.
 
+Functional grade crossings are authored as a portable
+`grade-crossings.json`. The separately installable
+`Hrogers.CrossingRuntime` loads that map data without requiring the Tile Editor
+or AI Traffic and exposes it to every native Auto Engineer planner, including
+player-owned locomotives in Waypoint mode. Functional-ready train signals are
+authored separately in `train-signals.json`; `Hrogers.SignalRuntime` loads
+Railroader's own animated semaphore asset without requiring the Tile Editor.
+Its live **Signals & CTC**, **Train Orders**, and **My Orders** desks join the
+normal Company > Operations window (alongside AI Traffic's Traffic Control
+page when installed); F9 remains the map-authoring editor.
+
+Signal placement supports a one-time rail snap or a persistent track lock.
+Locked masts retain side/height/facing offsets and follow later Bezier curve,
+grade, and elevation edits through portable `train-signals.json` attachment
+data. The F9 OBJECTS page also identifies Railroader's original scene signs
+and provides a dedicated visible/hidden toggle without treating loader-added
+scenery signs as base-game objects.
+
 ## Runtime And Output Architecture
 
 The desktop Tile Editor and F9 in-game Geo workspace share the editing surface:
@@ -14,6 +32,22 @@ The desktop Tile Editor and F9 in-game Geo workspace share the editing surface:
   panel is resizable and does not use Alina's Map Editor. It can select and
   remember an installed RailLoader mod/game-graph itself, so the desktop Tile
   Editor does not need to be running.
+- A dedicated Signals workspace places Railroader's base-game animated
+  semaphore assemblies with one, two, or three heads. Signals have pointer
+  placement, amber world selection, WORLD/LOCAL movement, full rotation and
+  flip controls, exact transforms, test aspects, and stable future-facing
+  fields for interlocking ID, protected node/segment, and direction. The
+  portable `train-signals.json` is loaded during ordinary gameplay by the
+  independent `Hrogers.SignalRuntime`; players do not install Tile Editor.
+  Its Diamond Interlocking builder detects the actual intersection of two
+  non-connecting Bezier track segments, rejects a grade-separated overpass,
+  and places four independently adjustable A1/A2/B1/B2 semaphores. Setback,
+  lateral/vertical offset, signal heads, approach locking, and release length
+  are configurable; the portable record exposes both conflicting railroad
+  routes to external interlocking logic.
+  Long 500-800 m setbacks follow connected track automatically across segment
+  boundaries. Portable signal records separately expose the protected block
+  from mast to diamond and the approach-locking segments beyond the mast.
 - Node transforms have their own movable and resizable child window. The main
   Geo surface retains a compact node summary and continue-track controls,
   while naming, move/rotate, exact coordinates, actions, and selective
@@ -64,22 +98,39 @@ The desktop Tile Editor and F9 in-game Geo workspace share the editing surface:
 - Ctrl-dragging a track node moves it over terrain as one undoable edit.
   Dropping over a second cyan node connects the two while keeping the dragged
   node at its last valid terrain position.
+- Right-clicking the world clears every selected track, Spliney, scenery,
+  pole, object, or operations entry and cancels active placement, connection,
+  bridge-picking, Fit Arc, TrackSpan, pole-wiring, terrain, and delete modes.
+- While F9 is open, the mouse is reserved for editing. Railroader's mouse pan,
+  orbit, look, and wheel zoom are locked so the camera stays put during
+  placement; W/A/S/D and the normal fast-movement modifiers continue to move
+  the camera. Hold middle mouse to temporarily restore all normal camera mouse
+  controls; editing clicks are ignored until middle mouse is released.
 - The in-game Spliney workspace can also build a bridge directly from a
-  clicked track segment, sampling Railroader's exact 3D segment curve and
-  applying an adjustable below-rail deck offset.
+  clicked track segment. Its two endpoint controls inherit the track node
+  positions and rotations, reproducing Railroader's exact 3D Bezier span with
+  an adjustable below-rail deck offset and no redundant intermediate nodes.
+  After building, yellow track picking automatically remains armed for the
+  next bridge.
 - Road, river, bridge, and trestle control points show movement plus full
   Pitch/Heading/Roll rotation together, with the same arrow controls and
   precision step ranges used for track nodes and scenery.
+- Loaded base-game roads and rivers also expose their real control nodes. The
+  first change creates a same-name override in the selected graph, and every
+  adjustment refreshes the associated height, roadbed, dirt, object, water,
+  and vegetation-mask terrain modifiers.
 - Its live Scenery workspace provides a searchable loaded-asset palette,
-  mouse-pointer placement and in-world picking, transform controls, terrain snapping,
-  duplication, deletion, grouped undo/redo, and JSON saving. Geo and Scenery
-  also retain Railroader's native terrain rebuild.
+  including runtime-resolvable RailLoader `SCAssetPacks` that registered after
+  the initial Railroader catalog. Mouse-pointer placement, in-world picking,
+  transform controls, terrain snapping, duplication, deletion, grouped
+  undo/redo, and JSON saving remain available.
 - A dedicated Objects workspace selects base-game buildings and props under
   the mouse and saves move, rotation, scale, enable/disable, and safe clone
   operations as portable RailLoader mandelas. FUSE imports the same entries
   as `world.sceneClones`, so one graph remains compatible with both runtimes.
   Shared town/map/world roots are blocked so an individual station click
-  cannot move the entire loaded scene.
+  cannot move the entire loaded scene. Thin signs and small props receive a
+  modest screen-space picking halo when their normal ray target is missed.
 - A dedicated Poles workspace provides amber world markers, real pole-node
   creation at the mouse pointer, continuous-line placement, manual wire
   connections, WORLD/LOCAL movement, full Pitch/Heading/Roll rotation, and
@@ -100,7 +151,9 @@ The desktop Tile Editor and F9 in-game Geo workspace share the editing surface:
   available when the complete raster is preferred. Matching z15-z18
   resolution presets range from `Overview` through `Ultra`; adaptive detail
   keeps the camera area sharp without filling the entire coverage window with
-  maximum-resolution tiles.
+  maximum-resolution tiles. Both the desktop OSM toolbar and F9 Terrain
+  controls show cache usage and provide a confirmation-protected manual
+  `Clear Cache` button.
 - Track, scenery, road/river/bridge splineys, telegraph poles, and terrain
   tiles synchronize in both directions between the F9 workspace and the
   desktop editor. Dirty-edit ownership locks prevent simultaneous writes;

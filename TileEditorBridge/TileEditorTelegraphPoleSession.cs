@@ -261,6 +261,7 @@ namespace Hrogers.TileEditorBridge
                                      "yyyyMMdd-HHmmss",
                                      CultureInfo.InvariantCulture);
                     File.Copy(path, backup, false);
+                    TileEditorBackupRetention.PruneFor(path);
                     _telegraphPoleBackups[path] = backup;
                 }
                 var temp = path + ".tile-editor.tmp";
@@ -872,7 +873,8 @@ namespace Hrogers.TileEditorBridge
 
         public void Activate(PickableActivateEvent evt)
         {
-            _session?.SelectTelegraphPole(_poleId);
+            if (!TileEditorCameraInput.EditorWorldInputBlocked)
+                _session?.SelectTelegraphPole(_poleId);
         }
 
         public void Deactivate()

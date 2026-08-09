@@ -119,6 +119,10 @@ namespace Hrogers.TileEditorBridge
         private float _osmOpacity = 0.55f;
         private bool _osmLineworkMode = true;
         private int _osmDownloadsActive;
+        private int _osmCacheGeneration;
+        private int _osmDiskCacheFiles;
+        private long _osmDiskCacheBytes;
+        private bool _confirmClearOsmCache;
         private float _nextOsmRefreshAt;
         private Vector2Int _osmLastCenter =
             new Vector2Int(int.MinValue, int.MinValue);
@@ -159,6 +163,7 @@ namespace Hrogers.TileEditorBridge
                 "Cache",
                 "OSM");
             Directory.CreateDirectory(_osmCacheDirectory);
+            RefreshOsmDiskCacheStats();
             _osmStatus = _osmOverlayEnabled
                 ? "Waiting for loaded terrain"
                 : "OSM overlay is off";
@@ -259,6 +264,51 @@ namespace Hrogers.TileEditorBridge
                 ReconfigureOsmOverlay(true);
             }
             GUI.enabled = true;
+            GUILayout.EndHorizontal();
+            GUILayout.BeginHorizontal();
+            GUILayout.Label(
+                "CACHE  "
+                + FormatOsmCacheSize(_osmDiskCacheBytes)
+                + "  \u2022  "
+                + _osmDiskCacheFiles.ToString(
+                    "N0",
+                    CultureInfo.InvariantCulture)
+                + " tiles",
+                _mutedStyle);
+            GUILayout.FlexibleSpace();
+            if (_confirmClearOsmCache)
+            {
+                var cacheColor = GUI.backgroundColor;
+                GUI.backgroundColor =
+                    new Color(0.72f, 0.28f, 0.18f);
+                if (GUILayout.Button(
+                        "CONFIRM CLEAR",
+                        GUILayout.Width(130f),
+                        GUILayout.Height(26f)))
+                {
+                    ClearOsmDiskCache();
+                }
+                GUI.backgroundColor = cacheColor;
+                if (GUILayout.Button(
+                        "Cancel",
+                        GUILayout.Width(70f),
+                        GUILayout.Height(26f)))
+                {
+                    _confirmClearOsmCache = false;
+                }
+            }
+            else
+            {
+                GUI.enabled = _osmDiskCacheFiles > 0;
+                if (GUILayout.Button(
+                        "CLEAR CACHE...",
+                        GUILayout.Width(130f),
+                        GUILayout.Height(26f)))
+                {
+                    _confirmClearOsmCache = true;
+                }
+                GUI.enabled = true;
+            }
             GUILayout.EndHorizontal();
             if (_osmOverlayEnabled)
             {
@@ -933,11 +983,16 @@ namespace Hrogers.TileEditorBridge
             {
                 var key = _osmDownloadQueue.Dequeue();
                 _osmDownloadsActive++;
-                StartCoroutine(DownloadOsmTile(key));
+                StartCoroutine(
+                    DownloadOsmTile(
+                        key,
+                        _osmCacheGeneration));
             }
         }
 
-        private IEnumerator DownloadOsmTile(OsmTileKey key)
+        private IEnumerator DownloadOsmTile(
+            OsmTileKey key,
+            int cacheGeneration)
         {
             var url = string.Format(
                 CultureInfo.InvariantCulture,
@@ -967,11 +1022,30 @@ namespace Hrogers.TileEditorBridge
                     try
                     {
                         var bytes = request.downloadHandler.data;
+                        if (cacheGeneration
+                            != _osmCacheGeneration)
+                        {
+                            throw new OperationCanceledException(
+                                "OSM cache was cleared while this tile "
+                                + "was downloading.");
+                        }
                         var path = OsmCachePath(key);
+                        var priorLength =
+                            File.Exists(path)
+                                ? new FileInfo(path).Length
+                                : 0L;
                         Directory.CreateDirectory(
                             Path.GetDirectoryName(path)
                             ?? _osmCacheDirectory);
                         File.WriteAllBytes(path, bytes);
+                        if (priorLength == 0L)
+                            _osmDiskCacheFiles++;
+                        _osmDiskCacheBytes =
+                            Math.Max(
+                                0L,
+                                _osmDiskCacheBytes
+                                - priorLength
+                                + bytes.LongLength);
                         var texture = CreateOsmTexture(bytes);
                         if (texture == null)
                         {
@@ -990,6 +1064,11 @@ namespace Hrogers.TileEditorBridge
                             Destroy(texture);
                         }
                     }
+                    catch (OperationCanceledException)
+                    {
+                        // A manual clear invalidates downloads already in
+                        // flight so they cannot immediately repopulate disk.
+                    }
                     catch (Exception ex)
                     {
                         _logger?.Warning(
@@ -1000,7 +1079,8 @@ namespace Hrogers.TileEditorBridge
                     }
                 }
             }
-            _osmPending.Remove(key);
+            if (cacheGeneration == _osmCacheGeneration)
+                _osmPending.Remove(key);
             _osmDownloadsActive =
                 Mathf.Max(0, _osmDownloadsActive - 1);
             _nextOsmRefreshAt = 0f;
@@ -1163,6 +1243,145 @@ namespace Hrogers.TileEditorBridge
                 key.Y.ToString(
                     CultureInfo.InvariantCulture)
                 + ".png");
+        }
+
+        private void RefreshOsmDiskCacheStats()
+        {
+            _osmDiskCacheFiles = 0;
+            _osmDiskCacheBytes = 0L;
+            if (string.IsNullOrWhiteSpace(_osmCacheDirectory)
+                || !Directory.Exists(_osmCacheDirectory))
+            {
+                return;
+            }
+            try
+            {
+                foreach (var path in Directory.EnumerateFiles(
+                             _osmCacheDirectory,
+                             "*.png",
+                             SearchOption.AllDirectories))
+                {
+                    _osmDiskCacheFiles++;
+                    try
+                    {
+                        _osmDiskCacheBytes +=
+                            new FileInfo(path).Length;
+                    }
+                    catch
+                    {
+                        // A tile may disappear while statistics are read.
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger?.Warning(
+                    "Could not inspect the OSM cache: "
+                    + ex.Message);
+            }
+        }
+
+        private void ClearOsmDiskCache()
+        {
+            _confirmClearOsmCache = false;
+            var removedFiles = 0;
+            var removedBytes = 0L;
+            try
+            {
+                _osmCacheGeneration++;
+                ClearQueuedOsmDownloads();
+                _osmPending.Clear();
+                _osmRetryAfter.Clear();
+                ClearOsmOverlayContent();
+
+                if (Directory.Exists(_osmCacheDirectory))
+                {
+                    foreach (var path in Directory.EnumerateFiles(
+                                 _osmCacheDirectory,
+                                 "*.png",
+                                 SearchOption.AllDirectories)
+                             .ToArray())
+                    {
+                        try
+                        {
+                            var length = new FileInfo(path).Length;
+                            File.Delete(path);
+                            removedFiles++;
+                            removedBytes += length;
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger?.Warning(
+                                "Could not delete cached OSM tile "
+                                + path + ": " + ex.Message);
+                        }
+                    }
+                    foreach (var directory in Directory
+                                 .EnumerateDirectories(
+                                     _osmCacheDirectory,
+                                     "*",
+                                     SearchOption.AllDirectories)
+                                 .OrderByDescending(path => path.Length)
+                                 .ToArray())
+                    {
+                        try
+                        {
+                            if (!Directory.EnumerateFileSystemEntries(
+                                    directory).Any())
+                            {
+                                Directory.Delete(directory);
+                            }
+                        }
+                        catch
+                        {
+                            // Leaving an empty cache directory is harmless.
+                        }
+                    }
+                }
+
+                RefreshOsmDiskCacheStats();
+                _osmStatus =
+                    "Cleared "
+                    + removedFiles.ToString(
+                        "N0",
+                        CultureInfo.InvariantCulture)
+                    + " cached tiles ("
+                    + FormatOsmCacheSize(removedBytes)
+                    + ")";
+                _nextOsmRefreshAt = 0f;
+            }
+            catch (Exception ex)
+            {
+                RefreshOsmDiskCacheStats();
+                _osmStatus =
+                    "Could not clear OSM cache: " + ex.Message;
+                _logger?.Warning(_osmStatus);
+            }
+        }
+
+        private static string FormatOsmCacheSize(long bytes)
+        {
+            if (bytes >= 1024L * 1024L * 1024L)
+            {
+                return (bytes / (1024.0 * 1024.0 * 1024.0))
+                           .ToString("0.00", CultureInfo.InvariantCulture)
+                       + " GB";
+            }
+            if (bytes >= 1024L * 1024L)
+            {
+                return (bytes / (1024.0 * 1024.0))
+                           .ToString("0.0", CultureInfo.InvariantCulture)
+                       + " MB";
+            }
+            if (bytes >= 1024L)
+            {
+                return (bytes / 1024.0)
+                           .ToString("0.0", CultureInfo.InvariantCulture)
+                       + " KB";
+            }
+            return bytes.ToString(
+                       CultureInfo.InvariantCulture)
+                   + " B";
         }
 
         private void ReconfigureOsmOverlay(bool force)

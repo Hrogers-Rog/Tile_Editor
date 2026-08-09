@@ -19,6 +19,24 @@ from .generate import render_tile
 TILE_STRIDE = 512   # world pixels per tile (not 513 — the overlap pixel is shared)
 
 
+MAX_TILE_EDITOR_BACKUPS = 3
+
+
+def _prune_tile_editor_backups(path: Path) -> None:
+    prefix = path.name + ".tile-editor-backup-"
+    backups = sorted(
+        (candidate for candidate in path.parent.iterdir()
+         if candidate.is_file() and candidate.name.startswith(prefix)),
+        key=lambda candidate: candidate.stat().st_mtime,
+        reverse=True,
+    )
+    for stale in backups[MAX_TILE_EDITOR_BACKUPS:]:
+        try:
+            stale.unlink()
+        except OSError:
+            pass
+
+
 def tile_to_wp(tx: int, ty: int, max_y: int) -> tuple:
     """Top-left world-pixel (row, col) of tile (tx, ty)."""
     return (max_y - ty) * TILE_STRIDE, tx * TILE_STRIDE
@@ -145,6 +163,7 @@ class Tile:
             )
             shutil.copy2(path, backup)
             self._backup_path = backup
+            _prune_tile_editor_backups(path)
         temporary = Path(str(path) + ".tile-editor.tmp")
         try:
             self.write_copy(temporary)

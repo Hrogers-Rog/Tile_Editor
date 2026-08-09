@@ -1,4 +1,5 @@
 using System;
+using HarmonyLib;
 using UnityEngine;
 using UnityModManagerNet;
 
@@ -8,10 +9,23 @@ namespace Hrogers.TileEditorBridge
     {
         private static UnityModManager.ModEntry.ModLogger _logger;
         private static TileEditorBridgePanel _panel;
+        private static Harmony _harmony;
 
         public static bool Load(UnityModManager.ModEntry modEntry)
         {
             _logger = modEntry.Logger;
+            try
+            {
+                _harmony = new Harmony(modEntry.Info.Id);
+                _harmony.PatchAll(typeof(Main).Assembly);
+            }
+            catch (Exception ex)
+            {
+                _harmony = null;
+                _logger.Error(
+                    "Tile Editor mouse-camera lock could not be installed: "
+                    + ex);
+            }
             modEntry.OnToggle = OnToggle;
             modEntry.OnGUI = OnGui;
             modEntry.OnUnload = OnUnload;
@@ -63,6 +77,10 @@ namespace Hrogers.TileEditorBridge
                 UnityEngine.Object.Destroy(_panel.gameObject);
                 _panel = null;
             }
+            TileEditorCameraInput.SetMouseCameraLocked(false);
+            TileEditorCameraInput.EditorInputActive = false;
+            _harmony?.UnpatchAll(modEntry.Info.Id);
+            _harmony = null;
             return true;
         }
 

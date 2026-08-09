@@ -1,0 +1,11 @@
+{
+  "Id": "Hrogers.CrossingRuntime",
+  "DisplayName": "Hrogers Grade Crossing Runtime",
+  "Author": "Hrogers",
+  "Version": "1.0.0",
+  "ManagerVersion": "0.32.0",
+  "AssemblyName": "Hrogers.CrossingRuntime.dll",
+  "EntryMethod": "Hrogers.CrossingRuntime.Main.Load",
+  "HomePage": "",
+  "Repository": ""
+}
