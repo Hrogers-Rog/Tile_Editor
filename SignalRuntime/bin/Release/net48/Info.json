@@ -2,7 +2,7 @@
   "Id": "Hrogers.SignalRuntime",
   "DisplayName": "Hrogers Train Signal Runtime",
   "Author": "Hrogers",
-  "Version": "1.7.0",
+  "Version": "1.7.1",
   "ManagerVersion": "0.32.0",
   "AssemblyName": "Hrogers.SignalRuntime.dll",
   "EntryMethod": "Hrogers.SignalRuntime.Main.Load",

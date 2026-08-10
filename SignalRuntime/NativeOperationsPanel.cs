@@ -81,6 +81,7 @@ namespace Hrogers.SignalRuntime
     internal static class NativeOperationsPanel
     {
         private const string TrafficPageId = "trafficControl";
+        private const string PaperworkPageId = "paperworkDesk";
         private const string CtcPageId = "signalsCtc";
         private const string OrdersPageId = "trainOrders";
         private const string CrewOrdersPageId = "myOrders";
@@ -113,6 +114,12 @@ namespace Hrogers.SignalRuntime
                 pages.Add(Page(
                     TrafficPageId,
                     "Traffic Control"));
+            }
+            if (FindAiTrafficPaperworkBuilder() != null)
+            {
+                pages.Add(Page(
+                    PaperworkPageId,
+                    "Clerk's Office"));
             }
             pages.Add(Page(CtcPageId, "Signals & CTC"));
             pages.Add(Page(OrdersPageId, "Train Orders"));
@@ -164,6 +171,13 @@ namespace Hrogers.SignalRuntime
                     if (!TryBuildAiTrafficPage(builder))
                     {
                         originalOperationsBuilder?.Invoke(builder);
+                    }
+                    break;
+                case PaperworkPageId:
+                    if (!TryBuildAiTrafficPaperworkPage(builder))
+                    {
+                        builder.AddLabelEmptyState(
+                            "AI Traffic's Clerk's Office is unavailable.");
                     }
                     break;
                 case OrdersPageId:
@@ -731,9 +745,35 @@ namespace Hrogers.SignalRuntime
                     BindingFlags.Static | BindingFlags.NonPublic);
         }
 
+        private static MethodInfo FindAiTrafficPaperworkBuilder()
+        {
+            return AccessTools.TypeByName("AITraffic.OperationsPanelBuilder")?
+                .GetMethod(
+                    "BuildClerksOffice",
+                    BindingFlags.Static | BindingFlags.NonPublic);
+        }
+
         private static bool TryBuildAiTrafficPage(UIPanelBuilder builder)
         {
             var method = FindAiTrafficBuilder();
+            if (method == null)
+                return false;
+            try
+            {
+                method.Invoke(null, new object[] { builder });
+                return true;
+            }
+            catch (Exception ex)
+            {
+                ReportIntegrationFailure(ex);
+                return false;
+            }
+        }
+
+        private static bool TryBuildAiTrafficPaperworkPage(
+            UIPanelBuilder builder)
+        {
+            var method = FindAiTrafficPaperworkBuilder();
             if (method == null)
                 return false;
             try

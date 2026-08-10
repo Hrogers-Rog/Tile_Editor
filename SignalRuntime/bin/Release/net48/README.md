@@ -37,7 +37,7 @@ Editor UI:
 
 Version 1.6 adds the live railroad desk to Railroader's normal **Company >
 Operations** window. If Railroad Operations/AI Traffic is installed, its
-existing **Traffic Control** page is preserved and the same Operations tab gains
+existing **Traffic Control** and **Clerk's Office** pages are preserved and the same Operations tab gains
 **Signals & CTC**, **Train Orders**, and **My Orders** pages. Without AI Traffic,
 Signal Runtime creates the Operations tab itself. Dispatchers can line routes,
 command power switches, watch block and diamond indications, and administer

@@ -6,7 +6,7 @@ param(
 $ErrorActionPreference = "Stop"
 $sourceDir = $PSScriptRoot
 $repoRoot = (Resolve-Path (Join-Path $sourceDir "..")).Path
-$version = "1.7.0"
+$version = "1.7.1"
 $packageId = "Hrogers.SignalRuntime"
 $releaseRoot = Join-Path $repoRoot "dist\signal-runtime\$version"
 $stageDir = Join-Path $releaseRoot $packageId
