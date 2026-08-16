@@ -14,6 +14,7 @@ namespace Hrogers.TileEditorBridge
             FreeTrackNode,
             ConnectedTrackNode,
             SegmentControlNode,
+            NewSpliney,
             Scenery,
             TrainSignal,
             MandelaClone,
@@ -24,10 +25,13 @@ namespace Hrogers.TileEditorBridge
             OperationsPhysicalLoader,
             OperationsStationAgent,
             OperationsTurntable,
+            OperationsMarker,
         }
 
         private readonly RaycastHit[] _pointerRaycastHits =
             new RaycastHit[64];
+        private const float WorldRightClickMaxSeconds = 0.28f;
+        private const float WorldRightClickMaxTravel = 7f;
         private PointerPlacementKind _pointerPlacementKind;
         private PanelTab _pointerPlacementTab;
         private string _pointerPlacementPayload = string.Empty;
@@ -35,6 +39,24 @@ namespace Hrogers.TileEditorBridge
         private bool _hasPointerSurface;
         private RaycastHit _pointerSurfaceHit;
         private TileEditorPointerMarker _pointerMarker;
+        private TileEditorPointerMarker _newSplineStartMarker;
+        private bool _newSplineHasFirstPoint;
+        private bool _newSplineCreated;
+        private Vector3 _newSplineFirstPoint;
+        private bool _rightClickCandidate;
+        private float _rightClickStartedAt;
+        private Vector2 _rightClickLastPosition;
+        private float _rightClickTravel;
+
+        private bool DoesWorldEditorConsumePrimaryPointer()
+        {
+            return _panelTab == PanelTab.Terrain
+                   || _panelTab == PanelTab.Objects
+                   || _pointerPlacementKind
+                      != PointerPlacementKind.None
+                   || (_mapEditor != null
+                       && _mapEditor.NodeDragActive);
+        }
 
         private void UpdateWorldPointerTools()
         {
@@ -72,9 +94,7 @@ namespace Hrogers.TileEditorBridge
                 return;
             }
             if (_panelTab != _pointerPlacementTab
-                || Input.GetKeyDown(KeyCode.Escape)
-                || (Input.GetMouseButtonDown(1)
-                    && !IsPointerOverEditorWindow()))
+                || Input.GetKeyDown(KeyCode.Escape))
             {
                 CancelPointerPlacement();
                 return;
@@ -104,6 +124,12 @@ namespace Hrogers.TileEditorBridge
                     }
                     markerColor =
                         new Color(0.95f, 0.28f, 1f, 1f);
+                }
+                else if (_pointerPlacementKind
+                         == PointerPlacementKind.OperationsMarker)
+                {
+                    markerRadius = 2.25f;
+                    markerColor = new Color(1f, 0.72f, 0.12f, 1f);
                 }
                 ShowWorldPointerMarker(
                     _pointerSurfaceHit.point,
@@ -140,6 +166,8 @@ namespace Hrogers.TileEditorBridge
             _pointerPlacementTab = _panelTab;
             _pointerPlacementPayload = payload ?? string.Empty;
             _repeatPointerPlacement = repeat;
+            _newSplineHasFirstPoint = false;
+            _newSplineCreated = false;
             _lastPanelMessage =
                 "Pointer placement armed - click the world; Esc/right-click cancels";
         }
@@ -171,6 +199,61 @@ namespace Hrogers.TileEditorBridge
                     case PointerPlacementKind.SegmentControlNode:
                         result = _mapEditor.InjectSelectedSegmentAtPosition(
                             WorldTransformer.WorldToGame(worldPosition));
+                        break;
+                    case PointerPlacementKind.NewSpliney:
+                        var splinePoint =
+                            WorldTransformer.WorldToGame(worldPosition)
+                            + Vector3.up * 0.05f;
+                        if (!_newSplineHasFirstPoint)
+                        {
+                            _newSplineFirstPoint = splinePoint;
+                            _newSplineHasFirstPoint = true;
+                            if (_newSplineStartMarker == null)
+                            {
+                                _newSplineStartMarker =
+                                    new TileEditorPointerMarker(transform);
+                            }
+                            _newSplineStartMarker.Show(
+                                worldPosition,
+                                Vector3.up,
+                                1.35f,
+                                new Color(1f, 0.62f, 0.15f, 1f));
+                            _lastPanelMessage =
+                                "First spline point placed - click the next point";
+                            return;
+                        }
+                        if (!_newSplineCreated)
+                        {
+                            var splineWidth = _newSplineKind < 2
+                                ? ParseFloat(
+                                    _newSplineWidth,
+                                    "new spline width")
+                                : 0f;
+                            var splineId =
+                                _mapEditor.CreateSplineyBetweenPositions(
+                                    _newSplineName,
+                                    _pointerPlacementPayload,
+                                    _newSplineProfile,
+                                    _newSplineFirstPoint,
+                                    splinePoint,
+                                    splineWidth,
+                                    _newSplineHeadStyle == 0
+                                        ? "Block"
+                                        : "Bent",
+                                    _newSplineTailStyle == 0
+                                        ? "Block"
+                                        : "Bent");
+                            _newSplineName = string.Empty;
+                            _newSplineCreated = true;
+                            _newSplineStartMarker?.Hide();
+                            result = "Created " + splineId
+                                     + " - click to add another point";
+                        }
+                        else
+                        {
+                            result = _mapEditor.AppendSplinePointAtPosition(
+                                splinePoint);
+                        }
                         break;
                     case PointerPlacementKind.Scenery:
                         var sceneryId =
@@ -284,6 +367,12 @@ namespace Hrogers.TileEditorBridge
                                 _opsTurntableGauge,
                                 "bridge-track gauge"));
                         break;
+                    case PointerPlacementKind.OperationsMarker:
+                        result = _mapEditor.CreateOperatingMarkerAtPosition(
+                            BuildOperatingMarkerDraft(),
+                            WorldTransformer.WorldToGame(worldPosition));
+                        _opsOperatingMetadataLoaded = false;
+                        break;
                     default:
                         return;
                 }
@@ -310,8 +399,14 @@ namespace Hrogers.TileEditorBridge
             GUI.backgroundColor = new Color(0.08f, 0.70f, 0.78f);
             GUILayout.BeginHorizontal();
             GUILayout.Label(
-                "POINTER ARMED - click terrain"
-                + (_repeatPointerPlacement ? " (repeat)" : ""),
+                _pointerPlacementKind == PointerPlacementKind.NewSpliney
+                    ? !_newSplineHasFirstPoint
+                        ? "SPLINE - click the first point"
+                        : !_newSplineCreated
+                            ? "SPLINE - click the second point"
+                            : "SPLINE - click to add points"
+                    : "POINTER ARMED - click terrain"
+                      + (_repeatPointerPlacement ? " (repeat)" : ""),
                 _onlineStyle);
             if (GUILayout.Button(
                     "Cancel",
@@ -330,6 +425,9 @@ namespace Hrogers.TileEditorBridge
                 return;
             _pointerPlacementKind = PointerPlacementKind.None;
             _pointerPlacementPayload = string.Empty;
+            _newSplineHasFirstPoint = false;
+            _newSplineCreated = false;
+            _newSplineStartMarker?.Hide();
             _hasPointerSurface = false;
             HideWorldPointerMarker();
             if (updateStatus)
@@ -338,13 +436,56 @@ namespace Hrogers.TileEditorBridge
 
         private void HandleUniversalDeselectInput()
         {
-            if (!_visible
-                || !_runtimeEnabled
-                || !Input.GetMouseButtonDown(1)
-                || IsPointerOverEditorWindow())
+            if (!_visible || !_runtimeEnabled)
             {
+                ResetWorldRightClickCandidate();
                 return;
             }
+
+            if (Input.GetMouseButtonDown(1))
+            {
+                _rightClickCandidate = !IsPointerOverEditorWindow();
+                _rightClickStartedAt = Time.unscaledTime;
+                _rightClickLastPosition = Input.mousePosition;
+                _rightClickTravel = 0f;
+                return;
+            }
+
+            if (!_rightClickCandidate)
+                return;
+
+            var currentPosition = (Vector2)Input.mousePosition;
+            if (Input.GetMouseButton(1))
+            {
+                _rightClickTravel += Vector2.Distance(
+                    currentPosition,
+                    _rightClickLastPosition);
+                var rawMouseDelta = new Vector2(
+                    Input.GetAxisRaw("Mouse X"),
+                    Input.GetAxisRaw("Mouse Y"));
+                _rightClickTravel += rawMouseDelta.magnitude;
+                _rightClickLastPosition = currentPosition;
+                if (_rightClickTravel > WorldRightClickMaxTravel
+                    || Time.unscaledTime - _rightClickStartedAt
+                       > WorldRightClickMaxSeconds)
+                {
+                    // This is a camera orbit/pan gesture, not a deselect.
+                    _rightClickCandidate = false;
+                }
+                return;
+            }
+
+            if (!Input.GetMouseButtonUp(1))
+                return;
+
+            var shouldDeselect =
+                !IsPointerOverEditorWindow()
+                && _rightClickTravel <= WorldRightClickMaxTravel
+                && Time.unscaledTime - _rightClickStartedAt
+                   <= WorldRightClickMaxSeconds;
+            ResetWorldRightClickCandidate();
+            if (!shouldDeselect)
+                return;
 
             CancelPointerPlacement(false);
             EndTerrainStroke();
@@ -360,6 +501,13 @@ namespace Hrogers.TileEditorBridge
             HideWorldPointerMarker();
             _lastPanelMessage =
                 "Selection and active editor tool cleared";
+        }
+
+        private void ResetWorldRightClickCandidate()
+        {
+            _rightClickCandidate = false;
+            _rightClickStartedAt = 0f;
+            _rightClickTravel = 0f;
         }
 
         private bool TryGetPointerSurfaceHit(
@@ -503,6 +651,8 @@ namespace Hrogers.TileEditorBridge
         {
             _pointerMarker?.Dispose();
             _pointerMarker = null;
+            _newSplineStartMarker?.Dispose();
+            _newSplineStartMarker = null;
         }
     }
 

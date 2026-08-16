@@ -105,6 +105,8 @@ namespace Hrogers.TileEditorBridge
         private string _nodeRotationZ = "0";
         private string _transformNodeId = string.Empty;
         private string _segmentGroupEditorId = string.Empty;
+        private string _segmentIdEditorValue = string.Empty;
+        private string _segmentIdObservedValue = string.Empty;
         private string _segmentGroupEditorValue = string.Empty;
         private string _segmentGroupObservedValue = string.Empty;
         private string _lastWorldSelectionKey = string.Empty;
@@ -220,7 +222,7 @@ namespace Hrogers.TileEditorBridge
             }
 
             GUILayout.Label(
-                "MMB toggles camera  |  LOCKED: WASD / wheel / Q E  |  Shift+? survey  |  Right-click clears",
+                "Click track in either camera mode  |  MMB camera  |  LOCKED: WASD / wheel / Q E  |  Shift+? survey",
                 _mutedStyle);
             GUILayout.Label(Shorten(_lastPanelMessage, 72), _mutedStyle);
             GUI.DragWindow(new Rect(0f, 0f, _windowRect.width - 42f, 28f));
@@ -1834,6 +1836,43 @@ namespace Hrogers.TileEditorBridge
         {
             SyncSegmentGroupEditor(segment);
             GUILayout.Label("Track segment", _titleStyle);
+            GUILayout.Label(
+                "Segment ID / name",
+                _mutedStyle);
+            _segmentIdEditorValue = GUILayout.TextField(
+                _segmentIdEditorValue ?? string.Empty,
+                GUILayout.Height(29f));
+            var normalizedSegmentId =
+                (_segmentIdEditorValue ?? string.Empty).Trim();
+            var idControlsEnabled = GUI.enabled;
+            GUI.enabled = idControlsEnabled
+                          && !string.IsNullOrWhiteSpace(normalizedSegmentId)
+                          && !string.Equals(
+                              normalizedSegmentId,
+                              segment.Id,
+                              StringComparison.Ordinal);
+            if (GUILayout.Button(
+                    "Rename Segment ID",
+                    GUILayout.Height(30f)))
+            {
+                RunGameAction(() =>
+                {
+                    var previousId = segment.Id;
+                    var renamedId = _mapEditor.RenameSelectedSegment(
+                        normalizedSegmentId);
+                    _segmentGroupEditorId = renamedId;
+                    _segmentIdEditorValue = renamedId;
+                    _segmentIdObservedValue = renamedId;
+                    return "Renamed segment " + previousId
+                           + " to " + renamedId;
+                });
+            }
+            GUI.enabled = idControlsEnabled;
+            GUILayout.Label(
+                "The ID is the segment's JSON key. Rename it before wiring "
+                + "external signal or CTC files whenever possible.",
+                _mutedStyle);
+            GUILayout.Space(5f);
             GUILayout.BeginHorizontal();
             if (GUILayout.Button("INSERT AT MOUSE...", GUILayout.Height(32f)))
             {
@@ -2041,6 +2080,8 @@ namespace Hrogers.TileEditorBridge
                     StringComparison.Ordinal))
             {
                 _segmentGroupEditorId = segment?.Id ?? string.Empty;
+                _segmentIdEditorValue = segment?.Id ?? string.Empty;
+                _segmentIdObservedValue = segment?.Id ?? string.Empty;
                 _segmentGroupEditorValue = current;
                 _segmentGroupObservedValue = current;
                 return;
@@ -2056,6 +2097,18 @@ namespace Hrogers.TileEditorBridge
             {
                 _segmentGroupEditorValue = current;
             }
+            if (!string.Equals(
+                    segment.Id,
+                    _segmentIdObservedValue,
+                    StringComparison.Ordinal)
+                && string.Equals(
+                    _segmentIdEditorValue,
+                    _segmentIdObservedValue,
+                    StringComparison.Ordinal))
+            {
+                _segmentIdEditorValue = segment.Id;
+            }
+            _segmentIdObservedValue = segment.Id;
             _segmentGroupObservedValue = current;
         }
 
@@ -2321,6 +2374,7 @@ namespace Hrogers.TileEditorBridge
         private void DrawSplineyTool()
         {
             var point = _mapEditor.SelectedSplinePoint;
+            DrawPointerPlacementStatus();
             if (point == null)
             {
                 _splineSelectionKey = string.Empty;
@@ -2333,7 +2387,8 @@ namespace Hrogers.TileEditorBridge
                     _lineStyle);
                 GUILayout.Label(
                     "Click a colored control point to edit an existing spline, "
-                    + "or place a new one at the camera target below.",
+                    + "or draw a new one by clicking each control point in "
+                    + "the world.",
                     _mutedStyle);
 
                 GUILayout.Space(6f);
@@ -2450,7 +2505,6 @@ namespace Hrogers.TileEditorBridge
                 DrawTextField(
                     "Name (optional)",
                     ref _newSplineName);
-                DrawTextField("Initial length (m)", ref _newSplineLength);
                 var createKind = _newSplineKind == 0
                     ? "Road"
                     : _newSplineKind == 1
@@ -2477,7 +2531,7 @@ namespace Hrogers.TileEditorBridge
                             GUILayout.EndHorizontal();
                         }
                     }
-                    DrawTextField("Initial width (m)", ref _newSplineWidth);
+                    DrawTextField("Width (m)", ref _newSplineWidth);
                 }
                 else
                 {
@@ -2498,9 +2552,54 @@ namespace Hrogers.TileEditorBridge
                     GUILayout.EndHorizontal();
                 }
 
+                GUILayout.Label(
+                    "Press Draw, click the first point, then keep clicking "
+                    + "to extend the spline. Right-click or Esc finishes.",
+                    _mutedStyle);
+                var splineDrawColor = GUI.backgroundColor;
+                GUI.backgroundColor = new Color(0.08f, 0.70f, 0.78f);
                 if (GUILayout.Button(
-                        "PLACE NEW " + createKind.ToUpperInvariant(),
+                        "DRAW NEW " + createKind.ToUpperInvariant()
+                        + " WITH MOUSE...",
                         GUILayout.Height(35f)))
+                {
+                    RunGameAction(() =>
+                    {
+                        if (_newSplineKind < 2)
+                        {
+                            if (string.IsNullOrWhiteSpace(
+                                    _newSplineProfile))
+                            {
+                                throw new InvalidOperationException(
+                                    "Choose a loaded road or river profile.");
+                            }
+                            var width = ParseFloat(
+                                _newSplineWidth,
+                                "new spline width");
+                            if (width < 0.5f || width > 500f)
+                            {
+                                throw new InvalidOperationException(
+                                    "Spline width must be between 0.5 and 500 m.");
+                            }
+                        }
+                        ArmPointerPlacement(
+                            PointerPlacementKind.NewSpliney,
+                            createKind,
+                            true);
+                        return "Click the first "
+                               + createKind.ToLowerInvariant()
+                               + " spline point";
+                    });
+                }
+                GUI.backgroundColor = splineDrawColor;
+
+                DrawTextField(
+                    "Quick-place length (m)",
+                    ref _newSplineLength);
+                if (GUILayout.Button(
+                        "PLACE " + createKind.ToUpperInvariant()
+                        + " AT CAMERA TARGET",
+                        GUILayout.Height(30f)))
                 {
                     RunGameAction("Placed new " + createKind + " spliney", () =>
                     {

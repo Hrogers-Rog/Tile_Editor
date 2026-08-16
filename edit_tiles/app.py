@@ -74,7 +74,7 @@ except ImportError:
 
 from .constants import *  # noqa: F401,F403
 from .osm import OsmOverlay
-from .terrain import (Tile, UndoRecord, load_tile, brush_mask, brush_falloff,
+from .terrain import (Tile, UndoRecord, TileDeleteRecord, load_tile, brush_mask, brush_falloff,
                        noise_brush, tile_to_wp, wp_to_tile_local)
 from .selection import SelectionBuffer, Clipboard, rasterise_polygon
 from .generate import (generate_tile, compute_hillshade, render_tile,
@@ -170,6 +170,13 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
         # ---- Editor state ----
         self.edit_mode        = False
         self.tile_delete_mode = False
+        self.tile_delete_selection: set[str] = set()
+        self.tile_delete_dragging = False
+        self.tile_delete_drag_start: tuple[int, int] | None = None
+        self.tile_delete_drag_end: tuple[int, int] | None = None
+        self.tile_delete_drag_operation = 'replace'
+        self.tile_delete_confirm = False
+        self._tile_cleanup_rects = []
         self.painting     = False
         self.brush_radius   = 20             # radius in SCREEN pixels (zoom-independent)
         self.brush_strength = 0.008          # fraction of full 16-bit range per paint step
@@ -5118,6 +5125,7 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
     # ------------------------------------------------------------------
     def _update_bounds(self):
         if not self.tiles:
+            self.min_x = self.max_x = self.min_y = self.max_y = 0
             return
         tile_values = list(self.tiles.values())
         xs = [t.x for t in tile_values]
@@ -5153,6 +5161,215 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
         tx = math.floor((sx - self.pan_x) / (self.tile_size * self.zoom)) + self.min_x
         ty = self.max_y - math.floor((sy - self.pan_y) / (self.tile_size * self.zoom))
         return tx, ty
+
+    # ------------------------------------------------------------------
+    # Recoverable whole-tile cleanup
+    # ------------------------------------------------------------------
+    def _tile_cleanup_box_keys(self, start=None, end=None):
+        """Return loaded tile keys inside an inclusive tile-coordinate box."""
+        start = start if start is not None else self.tile_delete_drag_start
+        end = end if end is not None else self.tile_delete_drag_end
+        if start is None or end is None:
+            return set()
+        x0, x1 = sorted((int(start[0]), int(end[0])))
+        y0, y1 = sorted((int(start[1]), int(end[1])))
+        result = set()
+        # Filter the loaded keys instead of iterating every coordinate in a
+        # potentially enormous off-map drag rectangle.
+        for key in self.tiles:
+            try:
+                tx_text, ty_text = key.split(',', 1)
+                tx, ty = int(tx_text), int(ty_text)
+            except (AttributeError, TypeError, ValueError):
+                continue
+            if x0 <= tx <= x1 and y0 <= ty <= y1:
+                result.add(key)
+        return result
+
+    def _tile_cleanup_preview_keys(self):
+        if not self.tile_delete_dragging:
+            return set()
+        return self._tile_cleanup_box_keys()
+
+    def _commit_tile_cleanup_box(self):
+        box_keys = self._tile_cleanup_box_keys()
+        operation = self.tile_delete_drag_operation
+        if operation == 'add':
+            self.tile_delete_selection.update(box_keys)
+        elif operation == 'subtract':
+            self.tile_delete_selection.difference_update(box_keys)
+        else:
+            self.tile_delete_selection = set(box_keys)
+        self.tile_delete_confirm = False
+        self.tile_delete_dragging = False
+        self.tile_delete_drag_start = None
+        self.tile_delete_drag_end = None
+        self._set_status(
+            f"Tile Cleanup: {len(self.tile_delete_selection)} tile(s) marked"
+        )
+
+    def _toggle_tile_cleanup(self):
+        self.tile_delete_mode = not self.tile_delete_mode
+        self.tile_delete_confirm = False
+        self.tile_delete_dragging = False
+        self.tile_delete_drag_start = None
+        self.tile_delete_drag_end = None
+        if self.tile_delete_mode:
+            self.edit_mode = False
+            self.select_mode = False
+            self._close_workspace_panels()
+            self._set_status(
+                "Tile Cleanup ON - drag a box; Shift adds, Ctrl/right-click removes"
+            )
+        else:
+            self.tile_delete_selection.clear()
+            self._set_status("Tile Cleanup OFF")
+
+    def _tile_cleanup_recovery_target(self, original_path, stamp):
+        original_path = Path(original_path).resolve()
+        source_dir = original_path.parent
+        recovery_root = (
+            source_dir.parent
+            / '_TileEditor_Deleted_Tiles'
+            / source_dir.name
+            / stamp
+        )
+        return recovery_root / original_path.name
+
+    def _write_tile_cleanup_manifests(self, entries):
+        by_folder = collections.defaultdict(list)
+        for entry in entries:
+            recovery_path = Path(entry['recovery_path'])
+            by_folder[recovery_path.parent].append(entry)
+        for recovery_folder, folder_entries in by_folder.items():
+            payload = {
+                'format': 'Hrogers Tile Editor recoverable tile cleanup',
+                'createdUtc': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+                'tiles': [
+                    {
+                        'tile': entry['key'],
+                        'original': str(entry['original_path']),
+                        'recovery': str(entry['recovery_path']),
+                    }
+                    for entry in folder_entries
+                ],
+            }
+            try:
+                (recovery_folder / 'restore-manifest.json').write_text(
+                    json.dumps(payload, indent=2), encoding='utf-8'
+                )
+            except OSError as ex:
+                print(f"[tile cleanup] manifest failed: {ex}")
+
+    def _delete_selected_tiles(self):
+        """Move marked tile files to recovery and remove them from the canvas."""
+        selected = sorted(set(self.tile_delete_selection) & set(self.tiles))
+        if not selected:
+            self.tile_delete_confirm = False
+            self._set_status("Tile Cleanup: mark at least one loaded tile")
+            return False
+        if getattr(self, '_game_terrain_sync_locked', False):
+            self.tile_delete_confirm = False
+            self._set_status(
+                "Game has unsaved terrain edits; tile cleanup is paused"
+            )
+            return False
+
+        stamp = time.strftime('%Y%m%d-%H%M%S') + f'-{time.time_ns() % 1000000:06d}'
+        entries = []
+        failures = []
+        for key in selected:
+            tile = self.tiles.get(key)
+            if tile is None:
+                continue
+            if tile.path is None:
+                failures.append(f'{key} has no source file')
+                continue
+            original_path = Path(tile.path).resolve()
+            if not original_path.is_file():
+                failures.append(f'{key} source is missing')
+                continue
+            recovery_path = self._tile_cleanup_recovery_target(
+                original_path, stamp
+            )
+            try:
+                recovery_path.parent.mkdir(parents=True, exist_ok=True)
+                if tile.dirty:
+                    # Preserve the exact edited pixels, then remove the old source.
+                    tile.write_copy(recovery_path)
+                    original_path.unlink()
+                else:
+                    shutil.move(str(original_path), str(recovery_path))
+            except OSError as ex:
+                failures.append(f'{key}: {ex}')
+                try:
+                    if recovery_path.exists() and original_path.exists():
+                        recovery_path.unlink()
+                except OSError:
+                    pass
+                continue
+
+            entries.append({
+                'key': key,
+                'tile': tile,
+                'original_path': original_path,
+                'recovery_path': recovery_path,
+            })
+            self.tiles.pop(key, None)
+
+        if not entries:
+            self.tile_delete_confirm = False
+            detail = failures[0] if failures else 'no files were moved'
+            self._set_status(f"Tile Cleanup failed: {detail}")
+            return False
+
+        self._write_tile_cleanup_manifests(entries)
+        self.undo_stack.append(TileDeleteRecord(entries))
+        self.tile_delete_selection.difference_update(
+            entry['key'] for entry in entries
+        )
+        self.tile_delete_confirm = False
+        self._update_bounds()
+        message = (
+            f"Moved {len(entries)} tile(s) to recovery - Ctrl+Z restores them"
+        )
+        if failures:
+            message += f"; {len(failures)} skipped"
+        self._set_status(message)
+        return True
+
+    def _restore_deleted_tiles(self, record):
+        restored = 0
+        conflicts = 0
+        for entry in record.entries:
+            key = entry['key']
+            tile = entry['tile']
+            original_path = Path(entry['original_path'])
+            recovery_path = Path(entry['recovery_path'])
+            if original_path.exists():
+                conflicts += 1
+                continue
+            if not recovery_path.exists():
+                conflicts += 1
+                continue
+            try:
+                original_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(recovery_path), str(original_path))
+            except OSError:
+                conflicts += 1
+                continue
+            tile.path = original_path
+            tile.dirty = False
+            self.tiles[key] = tile
+            restored += 1
+        self._update_bounds()
+        if restored:
+            message = f"Restored {restored} deleted tile(s)"
+            if conflicts:
+                message += f"; {conflicts} conflict(s) left in recovery"
+            self._set_status(message)
+        else:
+            self._set_status("Deleted tiles could not be restored; recovery was preserved")
 
     def screen_to_pixel(self, sx, sy):
         """
@@ -5875,6 +6092,9 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
             self._set_status("Nothing to undo")
             return
         rec = self.undo_stack.pop()
+        if isinstance(rec, TileDeleteRecord):
+            self._restore_deleted_tiles(rec)
+            return
         tile = self.tiles.get(rec.tile_key)
         if tile is None:
             return
@@ -15706,6 +15926,7 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
         self._draw_properties_panel(self.screen, content_top)
         self._draw_navbar(w, h, content_top, mx0, my0)
         self._draw_toolbar(w, h, content_top, mx0, my0)
+        self._draw_tile_cleanup_panel(w, h, content_top, mx0, my0)
         self._draw_status_and_overlays(w, h, content_top, mx0, my0)
 
         pygame.display.flip()

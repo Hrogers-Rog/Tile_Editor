@@ -19,13 +19,29 @@ namespace Hrogers.TileEditorBridge
 
         internal static bool PointerOverEditorWindow;
 
+        // True when the active editor workspace consumes a primary-button
+        // world gesture directly (terrain painting, pointer placement,
+        // Mandela picking, or a node drag). This is independent of the
+        // user's camera-lock preference.
+        internal static bool WorldEditPointerActive;
+
         internal static int LockRevision { get; private set; }
 
         internal static bool CameraNavigationUnlocked =>
             EditorInputActive && !MouseCameraLocked;
 
+        // Camera-free mode must still permit editor IPickable overlays. The
+        // native strategy camera already refuses to begin a left-drag pan
+        // when ObjectPicker is over one of those overlays, so a click can
+        // select track while a drag started on empty terrain still pans.
         internal static bool EditorWorldInputBlocked =>
-            CameraNavigationUnlocked || PointerOverEditorWindow;
+            PointerOverEditorWindow;
+
+        internal static bool SuppressMouseCameraForWorldEdit =>
+            EditorInputActive
+            && WorldEditPointerActive
+            && !PointerOverEditorWindow
+            && Input.GetMouseButton(0);
 
         internal static void SetMouseCameraLocked(bool locked)
         {
@@ -56,7 +72,9 @@ namespace Hrogers.TileEditorBridge
             ref bool ____rotateStarted)
         {
             if (!TileEditorCameraInput.EditorInputActive
-                || !TileEditorCameraInput.MouseCameraLocked)
+                || (!TileEditorCameraInput.MouseCameraLocked
+                    && !TileEditorCameraInput
+                        .SuppressMouseCameraForWorldEdit))
                 return true;
 
             // Locked editor navigation keeps the predictable keyboard camera

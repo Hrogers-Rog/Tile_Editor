@@ -233,6 +233,8 @@ namespace Hrogers.TileEditorBridge
                 SetVisible(!_visible);
             TileEditorCameraInput.PointerOverEditorWindow =
                 _visible && IsPointerOverEditorWindow();
+            TileEditorCameraInput.WorldEditPointerActive =
+                _visible && DoesWorldEditorConsumePrimaryPointer();
             HandleCameraNavigationToggle();
             MaintainGameInputLock();
             UpdateSurveyHud();
@@ -243,19 +245,14 @@ namespace Hrogers.TileEditorBridge
                 _mapEditor?.PollTerrainRebuildStatus();
             if (!string.IsNullOrWhiteSpace(terrainRebuildStatus))
                 _lastPanelMessage = terrainRebuildStatus;
-            if (TileEditorCameraInput.CameraNavigationUnlocked)
-            {
-                EndTerrainStroke();
-                _mapEditor?.CancelNodeDrag();
-                HideWorldPointerMarker();
-            }
-            else
-            {
-                HandleUniversalDeselectInput();
-                _mapEditor?.UpdateNodeDragFromPointer(
-                    IsPointerOverEditorWindow());
-                UpdateWorldPointerTools();
-            }
+            // Editing is independent of the camera preference. FREE keeps
+            // Railroader's normal camera available; LOCKED supplies the
+            // precise keyboard camera. Both modes must keep selection,
+            // dragging, terrain strokes, and pointer placement alive.
+            HandleUniversalDeselectInput();
+            _mapEditor?.UpdateNodeDragFromPointer(
+                IsPointerOverEditorWindow());
+            UpdateWorldPointerTools();
             UpdateOsmOverlay();
             if (Time.unscaledTime >= _nextReadAt)
             {
@@ -377,16 +374,10 @@ namespace Hrogers.TileEditorBridge
         {
             var locked = !TileEditorCameraInput.MouseCameraLocked;
             TileEditorCameraInput.SetMouseCameraLocked(locked);
-            if (!locked)
-            {
-                EndTerrainStroke();
-                _mapEditor?.CancelNodeDrag();
-                HideWorldPointerMarker();
-            }
             MaintainGameInputLock(force: true);
             _lastPanelMessage = locked
                 ? "Camera locked: WASD move, wheel zoom, Q/E rotate"
-                : "Camera free: Railroader mouse camera restored";
+                : "Camera free: normal mouse camera; editing remains active";
         }
 
         private void DrawWindow(int id)
@@ -710,6 +701,7 @@ namespace Hrogers.TileEditorBridge
         private void OnDestroy()
         {
             TileEditorCameraInput.PointerOverEditorWindow = false;
+            TileEditorCameraInput.WorldEditPointerActive = false;
             SaveNodeWindowGeometry();
             EndTerrainStroke();
             DisposeWorldPointerTools();
@@ -730,6 +722,7 @@ namespace Hrogers.TileEditorBridge
             if (!visible)
             {
                 TileEditorCameraInput.PointerOverEditorWindow = false;
+                TileEditorCameraInput.WorldEditPointerActive = false;
                 SaveNodeWindowGeometry();
                 _mapEditor?.CancelNodeDrag();
                 CancelPointerPlacement(false);

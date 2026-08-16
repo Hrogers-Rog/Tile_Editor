@@ -319,3 +319,10 @@ class UndoRecord:
         self.old_r = old_r.copy()
         self.old_g = old_g.copy()
         self.old_a = old_a.copy()
+
+
+class TileDeleteRecord:
+    """Files moved aside by one recoverable multi-tile cleanup operation."""
+
+    def __init__(self, entries):
+        self.entries = list(entries)

@@ -10,6 +10,17 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 
+def railroad_operations_signal_runtime_root():
+    root = Path(__file__).resolve().parent.parent
+    runtime = root.parent / "AI_Traffic" / "SignalRuntime"
+    if not runtime.exists():
+        raise unittest.SkipTest(
+            "Railroad Operations SignalRuntime source is not checked out "
+            "beside Tile Editor"
+        )
+    return runtime
+
+
 class PackageVersionTests(unittest.TestCase):
     def test_packaged_launcher_finds_python_without_path_requirement(self):
         if os.name != "nt":
@@ -318,7 +329,7 @@ class PackageVersionTests(unittest.TestCase):
         self.assertIn("DiscoverOperations();", refresh)
         self.assertIn("RebuildOperationOverlays();", refresh)
 
-    def test_trestles_support_fuse_and_strange_customs(self):
+    def test_splineys_prefer_fuse_and_keep_legacy_json_compatibility(self):
         root = Path(__file__).resolve().parent.parent
         source = (
             root / "TileEditorBridge" / "TileEditorSplineySession.cs"
@@ -332,7 +343,16 @@ class PackageVersionTests(unittest.TestCase):
             '"FUSE.Runtime.API.SplineyAPI"',
             source,
         )
-        self.assertIn("TryBuildLiveTrestleWithFuse", source)
+        self.assertIn("TryBuildLiveSplineWithFuse", source)
+        build_live = source.split(
+            "private void BuildLiveSpline(SplineSource source)", 1
+        )[1].split(
+            "private bool TryBuildLiveSplineWithFuse", 1
+        )[0]
+        self.assertLess(
+            build_live.index("TryBuildLiveSplineWithFuse(source)"),
+            build_live.index("source.Handler"),
+        )
         self.assertIn(
             '"FUSE.Authoring.Data.FuseSpliney"',
             source,
@@ -364,6 +384,10 @@ class PackageVersionTests(unittest.TestCase):
         self.assertIn('"Segment group"', panel_source)
         self.assertIn('"Apply Group"', panel_source)
         self.assertIn('"Clear"', panel_source)
+        self.assertIn("RenameSelectedSegment", graph_source)
+        self.assertIn("RenameSegmentReferencesInGraphDocument", graph_source)
+        self.assertIn('"Segment ID / name"', panel_source)
+        self.assertIn('"Rename Segment ID"', panel_source)
 
     def test_f9_track_class_is_editable_and_schema_safe(self):
         root = Path(__file__).resolve().parent.parent
@@ -907,6 +931,8 @@ class PackageVersionTests(unittest.TestCase):
         self.assertIn("StrangeCustoms.FlowyThingBuilder", session_source)
         self.assertIn("StrangeCustoms.AutoTrestleBuilder", session_source)
         self.assertIn("CreateSplineyAtCamera(", session_source)
+        self.assertIn("CreateSplineyBetweenPositions(", session_source)
+        self.assertIn("AppendSplinePointAtPosition(", session_source)
         self.assertIn("WorldTransformer.WorldToGame(", session_source)
         self.assertIn("source.LiveTrestle.Generate();", session_source)
         self.assertIn("SetTrestleEndStyles(", session_source)
@@ -916,6 +942,13 @@ class PackageVersionTests(unittest.TestCase):
         self.assertIn("_nextSplineAttachRetryAt", session_source)
         self.assertIn("Time.unscaledTime + 5f", session_source)
         self.assertIn("PLACE NEW SPLINEY", panel_source)
+        self.assertIn("DRAW NEW ", panel_source)
+        pointer_source = (
+            bridge / "TileEditorWorldPointer.cs"
+        ).read_text(encoding="utf-8")
+        self.assertIn("PointerPlacementKind.NewSpliney", pointer_source)
+        self.assertIn("First spline point placed", pointer_source)
+        self.assertIn("AppendSplinePointAtPosition", pointer_source)
         self.assertIn("Bridge / Trestle", panel_source)
         self.assertIn("Delete Entire Spliney...", panel_source)
 
@@ -998,6 +1031,10 @@ class PackageVersionTests(unittest.TestCase):
             "private bool TryGetPointerSurfaceHit(", 1
         )[0]
         self.assertIn("Input.GetMouseButtonDown(1)", cancel)
+        self.assertIn("Input.GetMouseButtonUp(1)", cancel)
+        self.assertIn("WorldRightClickMaxSeconds", cancel)
+        self.assertIn("WorldRightClickMaxTravel", cancel)
+        self.assertIn("camera orbit/pan gesture", cancel)
         self.assertIn("IsPointerOverEditorWindow()", cancel)
         self.assertIn("CancelPointerPlacement(false);", cancel)
         self.assertIn("EndTerrainStroke();", cancel)
@@ -1060,15 +1097,36 @@ class PackageVersionTests(unittest.TestCase):
         self.assertIn("____angleYInput = movement.y / 5f;", camera_source)
         self.assertIn("CameraNavigationUnlocked", camera_source)
         self.assertIn("SetMouseCameraLocked", camera_source)
+        world_block = camera_source.split(
+            "internal static bool EditorWorldInputBlocked", 1
+        )[1].split(
+            "internal static void SetMouseCameraLocked", 1
+        )[0]
+        self.assertIn("PointerOverEditorWindow", world_block)
+        self.assertNotIn("CameraNavigationUnlocked", world_block)
+        self.assertIn("WorldEditPointerActive", camera_source)
+        self.assertIn(
+            "SuppressMouseCameraForWorldEdit",
+            camera_source,
+        )
         self.assertIn(
             "Input.GetMouseButtonDown(2)",
             panel_source,
         )
         self.assertIn("ToggleCameraNavigationLock", panel_source)
-        self.assertIn(
-            "TileEditorCameraInput.CameraNavigationUnlocked",
-            panel_source,
-        )
+        update_loop = panel_source.split(
+            "private void Update()", 1
+        )[1].split("private void OnGUI()", 1)[0]
+        self.assertNotIn("CameraNavigationUnlocked", update_loop)
+        self.assertIn("HandleUniversalDeselectInput();", update_loop)
+        self.assertIn("UpdateNodeDragFromPointer(", update_loop)
+        self.assertIn("UpdateWorldPointerTools();", update_loop)
+        camera_toggle = panel_source.split(
+            "private void ToggleCameraNavigationLock()", 1
+        )[1].split("private void DrawWindow", 1)[0]
+        self.assertNotIn("EndTerrainStroke();", camera_toggle)
+        self.assertNotIn("CancelNodeDrag();", camera_toggle)
+        self.assertIn("editing remains active", camera_toggle)
         self.assertIn(
             "!TileEditorCameraInput.EditorWorldInputBlocked",
             overlay_source,
@@ -2307,7 +2365,7 @@ class PackageVersionTests(unittest.TestCase):
 
     def test_portable_train_signals_use_base_asset_without_editor_runtime(self):
         root = Path(__file__).resolve().parent.parent
-        runtime = root / "SignalRuntime"
+        runtime = railroad_operations_signal_runtime_root()
         registry_source = (
             runtime / "TrainSignalRegistry.cs"
         ).read_text(encoding="utf-8")
@@ -2430,7 +2488,7 @@ class PackageVersionTests(unittest.TestCase):
     def test_period_ctc_abs_and_train_orders_share_a_portable_model(self):
         root = Path(__file__).resolve().parent.parent
         bridge = root / "TileEditorBridge"
-        runtime = root / "SignalRuntime"
+        runtime = railroad_operations_signal_runtime_root()
         session_source = (
             bridge / "TileEditorCtcSession.cs"
         ).read_text(encoding="utf-8")
@@ -2455,18 +2513,17 @@ class PackageVersionTests(unittest.TestCase):
         self.assertIn("CreateCtcControlPointFromSelectedNode", session_source)
         self.assertIn("CreateCtcBlockFromSelectedSegment", session_source)
         self.assertIn("AddSelectedSegmentToCtcBlock", session_source)
-        self.assertIn("CreateTrainOrder", session_source)
-        self.assertIn('"Form 31"', panel_source)
         self.assertIn('"train-orders", "abs", "ctc"', session_source)
         self.assertIn("ResetCtcSession();", graph_source)
         self.assertIn("DisposeCtcSession();", graph_source)
         self.assertIn("OperationsTool.Signals", operations_source)
-        self.assertIn("OperationsTool.TrainOrders", operations_source)
+        self.assertNotIn("OperationsTool.TrainOrders", operations_source)
         self.assertIn('"TERRITORY PREVIEW / SELECT CONTROL POINT"', panel_source)
         self.assertIn('"ABS / CTC BLOCKS"', panel_source)
-        self.assertIn('"TIMETABLE & TRAIN ORDER AUTHORING"', panel_source)
-        self.assertIn('"FORM 19"', panel_source)
-        self.assertIn('"FORM 31"', panel_source)
+        self.assertNotIn("CreateTrainOrder", session_source)
+        self.assertNotIn('"TIMETABLE & TRAIN ORDER AUTHORING"', panel_source)
+        self.assertNotIn('"FORM 19"', panel_source)
+        self.assertNotIn('"FORM 31"', panel_source)
 
         self.assertIn('"ctc-system.json"', runtime_source)
         self.assertIn("controller.CanSetSwitch", runtime_source)
@@ -2485,7 +2542,7 @@ class PackageVersionTests(unittest.TestCase):
     def test_train_order_delivery_ack_authority_and_multiplayer_sync(self):
         root = Path(__file__).resolve().parent.parent
         bridge = root / "TileEditorBridge"
-        runtime = root / "SignalRuntime"
+        runtime = railroad_operations_signal_runtime_root()
         order_runtime = (
             runtime / "TrainOrderRuntime.cs"
         ).read_text(encoding="utf-8")
@@ -2513,13 +2570,13 @@ class PackageVersionTests(unittest.TestCase):
         self.assertIn('"aiManualStopDistance"', order_runtime)
         self.assertIn("PropertyChange.Control.TrainBrake", order_runtime)
         self.assertIn('locomotive.KeyValueObject["aiOrders"]', order_runtime)
-        self.assertIn("Input.GetKeyDown(KeyCode.F8)", order_runtime)
+        self.assertIn("Input.GetKeyDown(KeyCode.F6)", order_runtime)
+        self.assertNotIn("Input.GetKeyDown(KeyCode.F8)", order_runtime)
         self.assertIn("TryDeliverTrainOrder", main_source)
         self.assertIn("TryAcknowledgeTrainOrder", main_source)
-        self.assertIn("Company > Operations > Train", panel_source)
-        self.assertNotIn('GUILayout.Button("DELIVER TO CREW")', panel_source)
-        self.assertNotIn('GUILayout.Button("CREW ACKNOWLEDGE")', panel_source)
-        self.assertIn('"authority"', session_source)
+        self.assertNotIn("CreateTrainOrder", session_source)
+        self.assertNotIn("TIMETABLE & TRAIN ORDER AUTHORING", panel_source)
+        self.assertNotIn('"authority"', session_source)
         self.assertIn("RegisterPropertyObject", ctc_sync)
         self.assertIn("AccessLevel.Dispatcher", ctc_sync)
         self.assertIn("AuthorizationRequirement.PlayerIdKey", ctc_sync)
@@ -2537,7 +2594,7 @@ class PackageVersionTests(unittest.TestCase):
 
     def test_signal_desk_joins_native_company_operations_window(self):
         root = Path(__file__).resolve().parent.parent
-        runtime = root / "SignalRuntime"
+        runtime = railroad_operations_signal_runtime_root()
         native_panel = (
             runtime / "NativeOperationsPanel.cs"
         ).read_text(encoding="utf-8")
@@ -2553,7 +2610,9 @@ class PackageVersionTests(unittest.TestCase):
         self.assertIn('HarmonyAfter("com.hrogers.aitraffic")', native_panel)
         self.assertIn("GetComponentInParent<CompanyWindow>()", native_panel)
         self.assertIn('"Operations"', native_panel)
-        self.assertIn('"Traffic Control"', native_panel)
+        self.assertIn('"Dispatcher\'s Office"', native_panel)
+        self.assertIn('"Treasurer\'s Office"', native_panel)
+        self.assertIn('"BuildFinanceOffice"', native_panel)
         self.assertIn('"Signals & CTC"', native_panel)
         self.assertIn('"Train Orders"', native_panel)
         self.assertIn('"My Orders"', native_panel)
@@ -2562,7 +2621,8 @@ class PackageVersionTests(unittest.TestCase):
         self.assertIn("Main.TryDeliverTrainOrder", native_panel)
         self.assertIn("Main.TryAcknowledgeTrainOrder", native_panel)
         self.assertIn("AccessLevel.Dispatcher", native_panel)
-        self.assertIn("new Harmony(entry.Info.Id)", main_source)
+        self.assertIn("InitializeEmbedded", main_source)
+        self.assertIn("EmbeddedHarmonyId", main_source)
         self.assertIn('<Reference Include="0Harmony">', project_source)
 
 
