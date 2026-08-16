@@ -1,4 +1,4 @@
-# Hrogers Tile Editor Suite 0.25.0
+# Hrogers Tile Editor Suite 0.26.4
 
 Hold **Shift+?** in F9 for a live pointer survey showing map/game, Unity
 world, graph-local, terrain-tile, and tile-local coordinates plus the nearest
@@ -6,6 +6,11 @@ track's signed grade, heading, chainage, gauge, class, and group. F9 no longer
 locks the mouse camera automatically: middle mouse toggles between normal
 Railroader mouse navigation and an editing-safe camera lock. While locked,
 use W/A/S/D to move, the wheel to zoom, and Q/E to rotate.
+
+Yellow segments and cyan nodes remain clickable in both camera modes. Select
+a segment and open **Track** to edit its ID/name, group, gauge, style, or track
+class. Segment-ID renames also update references stored in the current graph;
+rename before assigning external signal/CTC files whenever practical.
 
 ## Period signaling, CTC, ABS, and train orders
 
@@ -18,8 +23,8 @@ position-light families can use the same blocks and routes.
 The Signals page contains a schematic territory preview for authoring. Create a control
 point by clicking a turnout node, then assign its Normal and Reverse entry
 signals and comma-separated protected block IDs. Live dispatching is in the
-normal **Company > Operations > Signals & CTC** page supplied by standalone
-Signal Runtime. There, a dispatcher can command Normal/Reverse, line either
+normal **Company > Operations > Signals & CTC** page supplied by Railroad
+Operations. There, a dispatcher can command Normal/Reverse, line either
 route, or return the plant to Stop. The runtime checks cars on switches, block
 occupancy, conflicting routes, and switch correspondence before clearing a
 signal. A switch remains locked until the movement occupies and clears its
@@ -33,15 +38,22 @@ next block displays Approach; two clear blocks display Clear. Manual blocks
 hold their signals at Stop until a later operator/train-order authority layer
 explicitly clears them.
 
-The Orders page creates numbered Form 19, Form 31, track warrant, meet, hold,
-and run-extra records with train, crew, block limits, meet location,
-instructions, effective/expiry text, priority, and lifecycle settings. Issue
-and deliver orders to real Railroader train crews from **Company > Operations
-> Train Orders**. Crew members use **My Orders** there or press F8 to read,
-repeat/sign, and acknowledge through standalone Signal Runtime. The multiplayer host records the real player and time, then
-enforces the authored block authority for manual locomotives and Auto
-Engineer/Waypoint operation. Tile Editor is not required on crew clients.
-All territory data is stored in `ctc-system.json` beside the edited graph.
+Train orders are working railroad forms and are created in **Company >
+Operations > Train Orders**, not in Tile Editor. Crew members use **My
+Orders** there or press **F6** to read, repeat/sign, and acknowledge through
+Railroad Operations. Tile Editor authors only the fixed physical plant and
+territory metadata—signals, CTC blocks, control points, authority limits, and
+ownership—which Railroad Operations uses when a dispatcher issues an order.
+The multiplayer host records the real player and time, then enforces the
+issued block authority for manual locomotives and Auto Engineer/Waypoint
+operation. Tile Editor is not required on crew clients. All fixed territory
+data is stored in `ctc-system.json` beside the edited graph.
+
+Operating markers can also bind a mechanical shop's stores or a railroad fuel
+receiver to a real Railroader unloader. Use **Shop stores** with the target
+mechanical-shop ID, or **Fuel / supply** with a target field such as `coal`,
+`diesel-fuel`, or `repair-parts`. Railroad Operations then follows the exact
+physical car through receipt, native unloading, and empty release.
 
 ## Portable train signals and grade crossings
 
@@ -50,9 +62,8 @@ assemblies rather than decorative scenery. Choose one, two, or three heads;
 place at the mouse pointer; move, rotate, or flip it; test an aspect; and save
 stable interlocking, protected-node, protected-segment, and direction metadata.
 Signals are written immediately to `train-signals.json` beside the selected
-map graph. Distribute the standalone `Hrogers.SignalRuntime` with the map. It
-loads the base-game signal asset and operates generated diamond interlockings
-without requiring Tile Editor during gameplay.
+map graph. Railroad Operations loads the base-game signal asset and operates
+generated diamond interlockings without requiring Tile Editor during gameplay.
 
 The Diamond Interlocking builder accepts two non-connecting crossing track
 segments, finds their actual curve intersection, and creates A1/A2/B1/B2

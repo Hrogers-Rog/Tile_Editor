@@ -144,6 +144,7 @@ namespace Hrogers.TileEditorBridge
             _editorLockedInputAsset = null;
             _editorWorldInputBlocked = false;
             TileEditorCameraInput.PointerOverEditorWindow = false;
+            TileEditorCameraInput.WorldEditPointerActive = false;
             _nextEditorInputLockCheckAt = 0f;
         }
     }

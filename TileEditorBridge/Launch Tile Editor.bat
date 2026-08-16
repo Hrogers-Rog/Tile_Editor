@@ -1,7 +1,7 @@
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
 cd /d "%~dp0"
-title Hrogers Tile Editor Suite 0.25.0
+title Hrogers Tile Editor Suite 0.26.4
 
 set "EDITOR_DIR=%~dp0TileEditor"
 set "VENV_DIR=%EDITOR_DIR%\.venv"
@@ -13,7 +13,7 @@ if exist "%INSTALLED_GAME_DIR%\Railroader_Data" if exist "%INSTALLED_GAME_DIR%\M
 )
 
 echo ============================================================
-echo   Hrogers Tile Editor Suite 0.25.0
+echo   Hrogers Tile Editor Suite 0.26.4
 echo ============================================================
 echo.
 

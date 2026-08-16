@@ -1,5 +1,85 @@
 # Changelog
 
+## 0.26.4
+
+- Distinguishes a short stationary right-click from a held or dragged camera
+  gesture in CAMERA FREE mode. A click still deselects everything, while
+  right-drag camera navigation preserves the current editor selection.
+- Applies the same gesture test to armed placement and terrain tools so using
+  the right mouse button to inspect the scene no longer cancels current work.
+
+## 0.26.3
+
+- Leaves a visible draft control marker after the first spline click so the
+  starting node is never hidden while choosing the next point.
+- Blends the incoming and outgoing directions at every appended control point
+  for smoother curves and grade transitions while continuously laying a road,
+  river, or bridge spline.
+
+## 0.26.2
+
+- Builds newly placed roads, rivers, and bridges through FUSE's native
+  `SplineyAPI` whenever FUSE is loaded. The legacy handler names remain in
+  saved RailLoader-compatible JSON, but FUSE no longer falls into its
+  non-building Strange Customs compatibility shim at runtime.
+- Adds continuous mouse spline laying in F9. Choose Road, River, or Trestle,
+  click the first control point, click the second to create the spline, and
+  keep clicking to append points; right-click or Esc finishes the tool.
+- Calculates each new control point's pitch and heading from the previous
+  point so newly drawn spline geometry follows terrain elevation instead of
+  starting as a fixed camera-facing strip.
+
+## 0.26.1
+
+- Makes the F9 camera lock an optional navigation aid instead of an editing
+  requirement. Track, node, scenery, spliney, pole, terrain, signal, object,
+  and operations pointer tools continue updating in both CAMERA FREE and
+  CAMERA LOCKED modes.
+- Stops switching to CAMERA FREE from canceling active node drags, terrain
+  strokes, or pointer-placement previews.
+- Temporarily suppresses the normal mouse-camera pan only while a direct
+  world-edit gesture is consuming the primary mouse button. Normal FREE-mode
+  camera controls resume immediately when the edit gesture ends.
+
+## 0.26.0
+
+- Adds a dedicated desktop **Tile Cleanup** workspace for deleting many
+  terrain tiles in one operation. Drag replaces the marked set, Shift-drag
+  adds, and Ctrl-drag or right-drag removes tiles from it.
+- Adds **Select All** and **Invert / Outside ROW** controls so a generated
+  square can be trimmed quickly by marking the right-of-way and inverting the
+  selection. Every marked tile is visibly shaded red before deletion.
+- Makes batch deletion recoverable: source `.data` files move to a timestamped
+  `_TileEditor_Deleted_Tiles` folder with a restore manifest instead of being
+  permanently erased. A second confirmation is required and Ctrl+Z restores
+  the complete batch, including unsaved terrain pixels.
+
+## 0.25.2
+
+- Adds map-generic Railroad Operations markers for crossings, passenger spots,
+  clearance points, switching leads, runarounds, interchange limits, portals,
+  mail spots, shop bays, shop stores, physical supply receiving, recovery
+  checkpoints, authority limits, ownership boundaries, and trackage rights.
+- Binds marker records to native Railroader industry/component, passenger-stop,
+  segment, span, node, and track-group identities without moving live train
+  orders into the map editor.
+- Documents that Form 19/31 and other working paperwork are created and sent
+  from Company > Operations; F6 opens a received train-order crew copy.
+
+## 0.25.1
+
+- Fixes yellow segment selection after the camera-navigation update. Track
+  nodes, segments, scenery, poles, signals, and other editor overlays remain
+  clickable while the camera is FREE; Railroader only starts a mouse pan when
+  the drag begins on empty terrain. Camera LOCKED remains available for exact
+  placement and dragging.
+- Makes the segment hover tooltip show its group and explicitly identify the
+  line as editable. Selecting a segment now points directly to the Track form
+  for group, gauge, style, class, and control-node editing.
+- Adds a Segment ID/name field to that form. Renaming creates the new live
+  graph segment, preserves geometry and properties, updates segment references
+  stored inside the current graph document, and remains part of graph undo.
+
 ## 0.25.0
 
 - Adds a hold-to-view **Shift+? Track Survey** HUD. The pointer readout shows

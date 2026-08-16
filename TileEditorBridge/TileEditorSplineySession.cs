@@ -482,6 +482,87 @@ namespace Hrogers.TileEditorBridge
                 });
         }
 
+        internal string AppendSplinePointAtPosition(Vector3 position)
+        {
+            ValidateVector(position, "new spline point position");
+            var source = RequireSplinePoint();
+            var previousIndex = SplinePointCount(source) - 1;
+            if (previousIndex < 1)
+                throw new InvalidOperationException(
+                    "A live spline must have at least two points.");
+            var previousPosition =
+                SplinePointPosition(source, previousIndex);
+            var outgoing = position - previousPosition;
+            var distance = outgoing.magnitude;
+            if (distance < 2f || distance > 2000f)
+                throw new InvalidOperationException(
+                    "The next spline point must be between 2 and 2000 m away.");
+            var incoming = previousPosition
+                           - SplinePointPosition(
+                               source,
+                               previousIndex - 1);
+            var blendedDirection = incoming.sqrMagnitude < 0.001f
+                ? outgoing.normalized
+                : incoming.normalized + outgoing.normalized;
+            if (blendedDirection.sqrMagnitude < 0.001f)
+                blendedDirection = outgoing.normalized;
+            var previousRotation = Quaternion.LookRotation(
+                blendedDirection.normalized,
+                Vector3.up).eulerAngles;
+            var newRotation = Quaternion.LookRotation(
+                outgoing.normalized,
+                Vector3.up).eulerAngles;
+
+            EditSelectedSplinePoint(
+                liveSource =>
+                {
+                    var owner = LiveSplineTransform(liveSource);
+                    if (liveSource.LivePath != null)
+                    {
+                        var path = liveSource.LivePath;
+                        var previous = path.points[previousIndex];
+                        var previousLocalRotation =
+                            SplineRotationFromGame(
+                                owner,
+                                previousRotation);
+                        var newLocalRotation = SplineRotationFromGame(
+                            owner,
+                            newRotation);
+                        previous.eulerAngles = previousLocalRotation;
+                        path.points[previousIndex] = previous;
+                        path.points.Add(new RiverPath.Point(
+                            SplinePointFromGame(owner, position),
+                            newLocalRotation,
+                            previous.width));
+                    }
+                    else
+                    {
+                        var trestle = liveSource.LiveTrestle;
+                        var previous =
+                            trestle.controlPoints[previousIndex];
+                        var previousLocalRotation = Quaternion.Euler(
+                            SplineRotationFromGame(
+                                owner,
+                                previousRotation));
+                        var newLocalRotation = Quaternion.Euler(
+                            SplineRotationFromGame(owner, newRotation));
+                        previous.rotation = previousLocalRotation;
+                        trestle.controlPoints[previousIndex] = previous;
+                        trestle.controlPoints.Add(
+                            new TrestleComponent.ControlPoint
+                            {
+                                position = SplinePointFromGame(
+                                    owner,
+                                    position),
+                                rotation = newLocalRotation,
+                            });
+                    }
+                    _selectedSplinePoint = previousIndex + 1;
+                });
+            return "Added point " + (_selectedSplinePoint + 1)
+                   + " to " + source.Id;
+        }
+
         internal void DeleteSelectedSplinePoint()
         {
             var source = RequireSplinePoint();
@@ -517,14 +598,50 @@ namespace Hrogers.TileEditorBridge
             string headStyle,
             string tailStyle)
         {
-            RequireGraphEditOwnership();
-            RequireSession();
             if (CameraSelector.shared == null)
                 throw new InvalidOperationException(
                     "Railroader's camera is not ready.");
             if (length < 2f || length > 2000f)
                 throw new InvalidOperationException(
                     "New spline length must be between 2 and 2000 m.");
+
+            var start = WorldTransformer.WorldToGame(
+                            CameraSelector.shared.CurrentCameraGroundPosition)
+                        + Vector3.up * 0.05f;
+            var yaw = Camera.main == null
+                ? 0f
+                : Camera.main.transform.eulerAngles.y;
+            var rotation = new Vector3(0f, yaw, 0f);
+            var end = start
+                      + Quaternion.Euler(rotation)
+                      * Vector3.forward * length;
+            return CreateSplineyBetweenPositions(
+                requestedId,
+                kind,
+                profile,
+                start,
+                end,
+                width,
+                headStyle,
+                tailStyle);
+        }
+
+        internal string CreateSplineyBetweenPositions(
+            string requestedId,
+            string kind,
+            string profile,
+            Vector3 start,
+            Vector3 end,
+            float width,
+            string headStyle,
+            string tailStyle)
+        {
+            RequireGraphEditOwnership();
+            RequireSession();
+            var length = Vector3.Distance(start, end);
+            if (length < 2f || length > 2000f)
+                throw new InvalidOperationException(
+                    "New spline endpoints must be between 2 and 2000 m apart.");
 
             var splineKind = ParseSplineKind(kind);
             if (splineKind != SplineKind.Trestle)
@@ -548,16 +665,10 @@ namespace Hrogers.TileEditorBridge
 
             EnsureSplineDocument(_graphPath, _document);
             var id = UniqueSplineId(requestedId, splineKind);
-            var start = WorldTransformer.WorldToGame(
-                            CameraSelector.shared.CurrentCameraGroundPosition)
-                        + Vector3.up * 0.05f;
-            var yaw = Camera.main == null
-                ? 0f
-                : Camera.main.transform.eulerAngles.y;
-            var rotation = new Vector3(0f, yaw, 0f);
-            var end = start
-                      + Quaternion.Euler(rotation)
-                      * Vector3.forward * length;
+            var direction = (end - start).normalized;
+            var rotation = Quaternion.LookRotation(
+                direction,
+                Vector3.up).eulerAngles;
             var entry = new JObject();
             if (splineKind == SplineKind.Trestle)
             {
@@ -1351,6 +1462,13 @@ namespace Hrogers.TileEditorBridge
 
         private void BuildLiveSpline(SplineSource source)
         {
+            // FUSE exposes Strange Customs compatibility shims so legacy JSON
+            // can still be converted, but those shims intentionally do not
+            // create runtime road/river objects. Prefer FUSE's native API for
+            // every supported spline kind whenever it is present.
+            if (TryBuildLiveSplineWithFuse(source))
+                return;
+
             var builderType = AppDomain.CurrentDomain.GetAssemblies()
                 .Select(assembly => assembly.GetType(
                     source.Handler,
@@ -1359,11 +1477,6 @@ namespace Hrogers.TileEditorBridge
                 .FirstOrDefault(type => type != null);
             if (builderType == null)
             {
-                if (source.Kind == SplineKind.Trestle
-                    && TryBuildLiveTrestleWithFuse(source))
-                {
-                    return;
-                }
                 throw new InvalidOperationException(
                     source.Kind == SplineKind.Trestle
                         ? "No compatible trestle builder is loaded. "
@@ -1415,7 +1528,7 @@ namespace Hrogers.TileEditorBridge
             source.BuiltWithFuse = false;
         }
 
-        private bool TryBuildLiveTrestleWithFuse(SplineSource source)
+        private bool TryBuildLiveSplineWithFuse(SplineSource source)
         {
             var apiType = FindLoadedType("FUSE.Runtime.API.SplineyAPI");
             if (apiType == null)
@@ -1438,15 +1551,30 @@ namespace Hrogers.TileEditorBridge
                 || pointTokens.Count < 2)
             {
                 throw new InvalidOperationException(
-                    "A trestle requires at least two spline points.");
+                    "A " + source.Kind.ToString().ToLowerInvariant()
+                    + " requires at least two spline points.");
             }
 
             var definition = Activator.CreateInstance(definitionType);
-            SetPublicProperty(definition, "Type", "trestle");
+            SetPublicProperty(
+                definition,
+                "Type",
+                source.Kind.ToString().ToLowerInvariant());
             SetPublicProperty(
                 definition,
                 "Profile",
                 ReadEntryString(source.Entry, "profile", null));
+            SetPublicProperty(
+                definition,
+                "Style",
+                ReadEntryString(
+                    source.Entry,
+                    "style",
+                    source.Kind.ToString()));
+            SetPublicProperty(
+                definition,
+                "OffsetY",
+                source.Entry["offsetY"]?.Value<float>() ?? 0f);
             SetPublicProperty(
                 definition,
                 "HeadStyle",
@@ -1465,7 +1593,7 @@ namespace Hrogers.TileEditorBridge
                 if (pointToken == null)
                 {
                     throw new InvalidOperationException(
-                        "Trestle point " + (index + 1)
+                        "Spline point " + (index + 1)
                         + " is not a valid point object.");
                 }
                 var point = Activator.CreateInstance(pointType);
@@ -1477,6 +1605,12 @@ namespace Hrogers.TileEditorBridge
                     point,
                     "Rotation",
                     ReadVector(pointToken["rotation"]));
+                SetPublicProperty(
+                    point,
+                    "Width",
+                    source.Kind == SplineKind.Trestle
+                        ? (float?)null
+                        : pointToken["width"]?.Value<float>() ?? 3.5f);
                 points.SetValue(point, index);
             }
             SetPublicProperty(definition, "Points", points);
@@ -1504,7 +1638,8 @@ namespace Hrogers.TileEditorBridge
             catch (TargetInvocationException ex)
             {
                 throw new InvalidOperationException(
-                    "FUSE could not build trestle '"
+                    "FUSE could not build "
+                    + source.Kind.ToString().ToLowerInvariant() + " '"
                     + source.Id + "': "
                     + (ex.InnerException?.Message ?? ex.Message),
                     ex.InnerException ?? ex);
@@ -1512,25 +1647,46 @@ namespace Hrogers.TileEditorBridge
             if (result == null)
             {
                 throw new InvalidOperationException(
-                    "FUSE did not create a live trestle.");
+                    "FUSE did not create a live "
+                    + source.Kind.ToString().ToLowerInvariant() + ".");
             }
 
-            source.LivePath = null;
+            source.LivePath = result.GetComponent<RiverPath>();
             source.LiveTrestle =
                 result.GetComponent<TrestleComponent>();
             source.BuiltWithFuse = true;
-            if (source.LiveTrestle == null)
+            if (source.Kind == SplineKind.Trestle
+                && source.LiveTrestle == null)
             {
                 throw new InvalidOperationException(
                     "FUSE created a spline without an AutoTrestle component.");
             }
-            if (source.LiveTrestle.controlPoints.Count >= 2)
+            if (source.Kind != SplineKind.Trestle
+                && source.LivePath == null)
+            {
+                throw new InvalidOperationException(
+                    "FUSE created a spline without a RiverPath component.");
+            }
+            if (source.LivePath != null)
+            {
+                source.LivePath.Rebuild();
+                var flowBuilder =
+                    source.LivePath.GetComponent<RiverBuilder>();
+                if (flowBuilder != null)
+                {
+                    flowBuilder.BuildSpline();
+                    flowBuilder.RequestUpdateCullingPosition();
+                }
+            }
+            else if (source.LiveTrestle != null
+                     && source.LiveTrestle.controlPoints.Count >= 2)
             {
                 source.LiveTrestle.Generate();
                 source.LiveTrestle.RequestUpdateCullingPosition();
             }
             _logger?.Log(
-                "Built trestle '" + source.Id
+                "Built " + source.Kind.ToString().ToLowerInvariant()
+                + " '" + source.Id
                 + "' with the FUSE spline API.");
             return true;
         }

@@ -162,7 +162,12 @@ namespace Hrogers.TileEditorBridge
                     + $"Length: {_segment.GetLength():F1} m\n"
                     + $"Style: {_segment.style}  Class: {_segment.trackClass}\n"
                     + "Gauge: "
-                    + _session.GetSegmentGaugeDisplay(_segment));
+                    + _session.GetSegmentGaugeDisplay(_segment)
+                    + "\nGroup: "
+                    + (string.IsNullOrWhiteSpace(_segment.groupId)
+                        ? "(none)"
+                        : _segment.groupId)
+                    + "\nClick to edit segment properties");
             }
         }
 

@@ -47,6 +47,9 @@ class EventsMixin:
         self.group_box_start = None
         self.group_box_end = None
         self.gen_dragging_grid = False
+        self.tile_delete_dragging = False
+        self.tile_delete_drag_start = None
+        self.tile_delete_drag_end = None
 
     def _close_workspace_panels(self):
         for attr in (
@@ -188,6 +191,10 @@ class EventsMixin:
 
     def _toggle_edit_mode(self):
         self.edit_mode = not self.edit_mode
+        if self.edit_mode and getattr(self, 'tile_delete_mode', False):
+            self.tile_delete_mode = False
+            self.tile_delete_selection.clear()
+            self.tile_delete_confirm = False
         if not self.edit_mode:
             self.select_mode = False
             self.sel_pending_paste = False
@@ -249,6 +256,8 @@ class EventsMixin:
             self._toggle_workspace_panel('geo')
         elif action == 'toggle_generate':
             self._toggle_workspace_panel('generate')
+        elif action == 'toggle_tile_cleanup':
+            self._toggle_tile_cleanup()
         elif action == 'mode_height':
             self.mode = 'height'
             self.invalidate_all()
@@ -335,6 +344,38 @@ class EventsMixin:
                 self.undo()
         return True
 
+    def _run_tile_cleanup_action(self, action):
+        """Handle controls in the desktop whole-tile cleanup strip."""
+        if action == 'cleanup_exit':
+            self._toggle_tile_cleanup()
+        elif action == 'cleanup_clear':
+            self.tile_delete_selection.clear()
+            self.tile_delete_confirm = False
+            self._set_status("Tile Cleanup: selection cleared")
+        elif action == 'cleanup_all':
+            self.tile_delete_selection = set(self.tiles)
+            self.tile_delete_confirm = False
+            self._set_status(
+                f"Tile Cleanup: all {len(self.tile_delete_selection)} tiles marked"
+            )
+        elif action == 'cleanup_invert':
+            self.tile_delete_selection = (
+                set(self.tiles) - set(self.tile_delete_selection)
+            )
+            self.tile_delete_confirm = False
+            self._set_status(
+                f"Tile Cleanup: inverted to {len(self.tile_delete_selection)} tile(s)"
+            )
+        elif action == 'cleanup_delete':
+            if not self.tile_delete_confirm:
+                self.tile_delete_confirm = True
+                self._set_status(
+                    "Review the red tiles, then click CONFIRM MOVE TO RECOVERY"
+                )
+            else:
+                self._delete_selected_tiles()
+        return True
+
     def _handle_keydown(self, event, mx0, my0, content_top):
         """Handle pygame.KEYDOWN. Returns True if consumed."""
         ctrl = event.mod & pygame.KMOD_CTRL
@@ -348,6 +389,25 @@ class EventsMixin:
                 self._help_page = (self._help_page + 1) % help_page_count
             elif event.key == pygame.K_LEFT:
                 self._help_page = (self._help_page - 1) % help_page_count
+            return True
+
+        # Dedicated whole-tile cleanup owns these keys while active.
+        if getattr(self, 'tile_delete_mode', False):
+            if event.key == pygame.K_ESCAPE:
+                self._toggle_tile_cleanup()
+            elif ctrl and event.key == pygame.K_a:
+                self._run_tile_cleanup_action('cleanup_all')
+            elif ctrl and event.key == pygame.K_z:
+                self.undo()
+            elif event.key == pygame.K_i:
+                self._run_tile_cleanup_action('cleanup_invert')
+            elif event.key == pygame.K_c:
+                self._run_tile_cleanup_action('cleanup_clear')
+            elif event.key in (pygame.K_DELETE, pygame.K_BACKSPACE):
+                self._run_tile_cleanup_action('cleanup_delete')
+            elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                if self.tile_delete_confirm:
+                    self._delete_selected_tiles()
             return True
 
         # Generate panel: type into token field, ESC closes
@@ -708,6 +768,17 @@ class EventsMixin:
                 for rect, action in getattr(self, '_shell_action_rects', []):
                     if rect.collidepoint(mx, my):
                         return self._run_shell_action(action)
+                return True
+
+        # ---- Whole-tile cleanup controls ----
+        cleanup_panel = getattr(self, '_tile_cleanup_panel_rect', None)
+        if getattr(self, 'tile_delete_mode', False) and cleanup_panel:
+            if cleanup_panel.collidepoint(mx, my):
+                if event.button == 1:
+                    for rect, action in getattr(
+                            self, '_tile_cleanup_rects', []):
+                        if rect.collidepoint(mx, my):
+                            return self._run_tile_cleanup_action(action)
                 return True
 
         # ---- Geometry panel scroll ----
@@ -1099,6 +1170,29 @@ class EventsMixin:
         if getattr(self, '_suspend_canvas_drag', False) and event.button in (1, 2, 3):
             return True
 
+        if getattr(self, 'tile_delete_mode', False):
+            if event.button == 2:
+                self.dragging = True
+                self.last_mouse = event.pos
+            elif event.button in (1, 3):
+                mods = pygame.key.get_mods()
+                operation = 'replace'
+                if event.button == 3 or mods & pygame.KMOD_CTRL:
+                    operation = 'subtract'
+                elif mods & pygame.KMOD_SHIFT:
+                    operation = 'add'
+                tile_coord = self.screen_to_tile(mx, my)
+                self.tile_delete_dragging = True
+                self.tile_delete_drag_start = tile_coord
+                self.tile_delete_drag_end = tile_coord
+                self.tile_delete_drag_operation = operation
+                self.tile_delete_confirm = False
+            elif event.button == 4:
+                self._zoom_at(event.pos, 1.15)
+            elif event.button == 5:
+                self._zoom_at(event.pos, 1 / 1.15)
+            return True
+
         if not self.edit_mode and event.button == 2:
             self.dragging = True
             self.last_mouse = event.pos
@@ -1323,6 +1417,12 @@ class EventsMixin:
 
     def _handle_mouseup(self, event, mx0, my0, content_top):
         """Handle pygame.MOUSEBUTTONUP."""
+        if (event.button in (1, 3)
+                and getattr(self, 'tile_delete_dragging', False)):
+            self.tile_delete_drag_end = self.screen_to_tile(*event.pos)
+            self._commit_tile_cleanup_box()
+            return True
+
         # Node drag commit
         # Group rubber band release Ã¢â‚¬â€ commit selection
         if event.button == 1 and self.group_box_start and self.group_box_end:
@@ -1549,6 +1649,7 @@ class EventsMixin:
                 self.sel_dragging or
                 self.group_box_start or
                 self.gen_dragging_grid or
+                self.tile_delete_dragging or
                 self.painting)):
             self._cancel_pointer_interactions()
 
@@ -1561,6 +1662,10 @@ class EventsMixin:
                 frac = (plot_rect.bottom - my) / max(1, plot_rect.height)
                 frac = max(0.0, min(1.0, frac))
                 self.profile_drag_preview_y = y_min + frac * (y_max - y_min)
+            return True
+
+        if getattr(self, 'tile_delete_dragging', False):
+            self.tile_delete_drag_end = self.screen_to_tile(mx, my)
             return True
 
         # Node drag motion

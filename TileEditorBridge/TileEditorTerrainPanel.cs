@@ -627,8 +627,7 @@ namespace Hrogers.TileEditorBridge
                 return;
             }
 
-            if (Input.GetKeyDown(KeyCode.Escape)
-                || Input.GetMouseButtonDown(1))
+            if (Input.GetKeyDown(KeyCode.Escape))
             {
                 EndTerrainStroke();
             }

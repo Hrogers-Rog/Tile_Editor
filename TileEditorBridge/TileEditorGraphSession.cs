@@ -474,6 +474,10 @@ namespace Hrogers.TileEditorBridge
             var previousSegment = _selectedSegment;
             _selectedSegment = segment;
             _selectedNode = null;
+            _worldNodeShortcutStatus =
+                "Selected segment " + segment.id
+                + ". Use Track to edit its group, gauge, style, class, "
+                + "or insert a control node.";
             RefreshTrackSelectionColors(
                 previousNode,
                 previousSegment,
@@ -1118,6 +1122,155 @@ namespace Hrogers.TileEditorBridge
                     WriteSegment(segment);
                 },
                 useTargetedTrackRebuild: true);
+        }
+
+        internal string RenameSelectedSegment(string requestedId)
+        {
+            var segment = RequireSegment();
+            var oldId = segment.id;
+            var newId = (requestedId ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(newId))
+            {
+                throw new InvalidOperationException(
+                    "Segment ID cannot be blank.");
+            }
+            if (newId.Length > 80
+                || newId.Any(character =>
+                    char.IsControl(character)
+                    || char.IsWhiteSpace(character)
+                    || character == '/'
+                    || character == '\\'
+                    || character == '|'))
+            {
+                throw new InvalidOperationException(
+                    "Segment IDs must be 80 characters or fewer and cannot "
+                    + "contain spaces, control characters, /, \\, or |.");
+            }
+            if (string.Equals(oldId, newId, StringComparison.Ordinal))
+                return oldId;
+            if (_graph.GetSegment(newId) != null
+                || SegmentsObject.Property(
+                    newId,
+                    StringComparison.OrdinalIgnoreCase) != null)
+            {
+                throw new InvalidOperationException(
+                    "A segment named " + newId + " already exists.");
+            }
+            if (IsGeneratedNarrowGaugeId(oldId))
+            {
+                throw new InvalidOperationException(
+                    "Generated narrow-gauge ghost segments inherit their "
+                    + "ID from a source segment and cannot be renamed directly.");
+            }
+
+            var model = CaptureSegment(segment);
+            model.Id = newId;
+            ExecuteEdit(
+                "Rename segment " + oldId + " to " + newId,
+                new[] { segment.a.id, segment.b.id },
+                new[] { oldId, newId },
+                () =>
+                {
+                    RenameSegmentReferencesInGraphDocument(oldId, newId);
+                    RemoveSegmentLive(oldId);
+                    WriteSegmentDeletion(oldId);
+                    var renamed = CreateSegmentLive(model);
+                    WriteSegment(renamed);
+                    _selectedSegment = renamed;
+                    _selectedNode = null;
+                });
+            return newId;
+        }
+
+        private void RenameSegmentReferencesInGraphDocument(
+            string oldId,
+            string newId)
+        {
+            foreach (var property in _document.Properties().ToArray())
+            {
+                if (string.Equals(
+                        property.Name,
+                        "tracks",
+                        StringComparison.OrdinalIgnoreCase)
+                    && property.Value is JObject tracks)
+                {
+                    foreach (var trackProperty in
+                             tracks.Properties().ToArray())
+                    {
+                        if (string.Equals(
+                                trackProperty.Name,
+                                "segments",
+                                StringComparison.OrdinalIgnoreCase)
+                            || string.Equals(
+                                trackProperty.Name,
+                                "removals",
+                                StringComparison.OrdinalIgnoreCase))
+                        {
+                            continue;
+                        }
+                        ReplaceSegmentReferenceValues(
+                            trackProperty.Value,
+                            oldId,
+                            newId,
+                            trackProperty.Name.IndexOf(
+                                "segment",
+                                StringComparison.OrdinalIgnoreCase) >= 0);
+                    }
+                    continue;
+                }
+                ReplaceSegmentReferenceValues(
+                    property.Value,
+                    oldId,
+                    newId,
+                    property.Name.IndexOf(
+                        "segment",
+                        StringComparison.OrdinalIgnoreCase) >= 0);
+            }
+        }
+
+        private static void ReplaceSegmentReferenceValues(
+            JToken token,
+            string oldId,
+            string newId,
+            bool segmentContext)
+        {
+            if (token is JObject objectToken)
+            {
+                foreach (var property in objectToken.Properties().ToArray())
+                {
+                    ReplaceSegmentReferenceValues(
+                        property.Value,
+                        oldId,
+                        newId,
+                        segmentContext
+                        || property.Name.IndexOf(
+                            "segment",
+                            StringComparison.OrdinalIgnoreCase) >= 0);
+                }
+                return;
+            }
+            if (token is JArray array)
+            {
+                foreach (var child in array.ToArray())
+                {
+                    ReplaceSegmentReferenceValues(
+                        child,
+                        oldId,
+                        newId,
+                        segmentContext);
+                }
+                return;
+            }
+            if (!segmentContext
+                || token.Type != JTokenType.String
+                || !string.Equals(
+                    token.Value<string>(),
+                    oldId,
+                    StringComparison.Ordinal))
+            {
+                return;
+            }
+            token.Replace(new JValue(newId));
         }
 
         internal void SetSelectedSegmentGauge(string gauge)

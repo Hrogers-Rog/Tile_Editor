@@ -14,8 +14,8 @@ namespace Hrogers.TileEditorBridge
             Industries,
             Passenger,
             Facilities,
+            Markers,
             Signals,
-            TrainOrders,
             All,
         }
 
@@ -86,6 +86,60 @@ namespace Hrogers.TileEditorBridge
         private string _opsTurntableStallAngle = "12";
         private string _opsTurntableTrackLength = "46";
         private string _opsTurntableGauge = "1.435";
+        private bool _opsOperatingMetadataLoaded;
+        private string _opsMarkerId = "marker:new";
+        private string _opsMarkerName = "New Operating Marker";
+        private string _opsMarkerType = "clearance-point";
+        private string _opsMarkerCompanyId = "tn";
+        private string _opsMarkerTargetId = string.Empty;
+        private string _opsMarkerTargetField = string.Empty;
+        private string _opsMarkerNativeIndustryId = string.Empty;
+        private string _opsMarkerNativeComponentId = string.Empty;
+        private string _opsMarkerNativeComponentType = string.Empty;
+        private string _opsMarkerNativePassengerStopId = string.Empty;
+        private string _opsMarkerServiceIds = string.Empty;
+        private string _opsMarkerSpanIds = string.Empty;
+        private string _opsMarkerTrackGroupIds = string.Empty;
+        private string _opsMarkerAllowedCompanyIds = string.Empty;
+        private string _opsMarkerRole = string.Empty;
+        private string _opsMarkerDirection = string.Empty;
+        private string _opsMarkerTolerance = string.Empty;
+        private string _opsMarkerCapacity = string.Empty;
+        private string _opsMarkerApproach = string.Empty;
+        private string _opsMarkerDwell = string.Empty;
+        private string _opsMarkerMaxCars = string.Empty;
+        private string _opsMarkerNotes = string.Empty;
+        private static readonly string[] OperatingMarkerTypes =
+        {
+            "grade-crossing", "passenger-stop",
+            "passenger-platform-clear", "clearance-point",
+            "fouling-point", "switching-lead", "runaround-limit",
+            "portal", "portal-entry", "portal-exit", "yard-track-role",
+            "interchange-spot", "interchange-main-clear",
+            "interchange-north-lead", "interchange-limit",
+            "freight-house-spot", "freight-house-clear", "freight-spot",
+            "recovery-checkpoint", "mail-spot", "shop-bay",
+            "roundhouse-track", "shop-stores", "supply-receiving",
+            "authority-limit", "ownership-boundary", "territory-rights",
+            "caboose-drop",
+        };
+        private static readonly string[] OperatingMarkerLabels =
+        {
+            "Crossing", "Passenger stop", "Platform clear",
+            "Clearance point", "Fouling point", "Switching lead",
+            "Runaround limit", "Portal", "Portal entry", "Portal exit",
+            "Yard track role", "Interchange spot", "Main clear",
+            "North lead", "Interchange limit", "Freight-house spot",
+            "Freight-house clear", "Freight spot", "Recovery",
+            "Mail spot", "Shop bay", "Roundhouse track", "Shop stores",
+            "Fuel / supply", "Authority limit", "Ownership boundary",
+            "Territory rights", "Caboose drop",
+        };
+        private string _opsTerritoryId = "territory:new";
+        private string _opsTerritoryName = "New Operating Territory";
+        private string _opsTerritoryOwner = "tn";
+        private string _opsTerritoryGroups = string.Empty;
+        private string _opsTerritoryAllowed = "tn";
 
         private void DrawOperationsPanel()
         {
@@ -144,15 +198,14 @@ namespace Hrogers.TileEditorBridge
             DrawOperationsToolButton(
                 "Facilities",
                 OperationsTool.Facilities);
+            DrawOperationsToolButton("Markers", OperationsTool.Markers);
             DrawOperationsToolButton("Signals", OperationsTool.Signals);
-            DrawOperationsToolButton("Orders", OperationsTool.TrainOrders);
             DrawOperationsToolButton("All", OperationsTool.All);
             GUILayout.EndHorizontal();
 
             GUILayout.Space(5f);
             DrawPointerPlacementStatus();
-            if (_operationsTool != OperationsTool.Signals
-                && _operationsTool != OperationsTool.TrainOrders)
+            if (_operationsTool != OperationsTool.Signals)
             {
                 DrawOperationsSearchAndList();
                 DrawSelectedOperation();
@@ -176,11 +229,11 @@ namespace Hrogers.TileEditorBridge
                 case OperationsTool.Facilities:
                     DrawFacilityBuilder();
                     break;
+                case OperationsTool.Markers:
+                    DrawOperatingMarkerBuilder();
+                    break;
                 case OperationsTool.Signals:
                     DrawOperationsCtcSignals();
-                    break;
-                case OperationsTool.TrainOrders:
-                    DrawOperationsTrainOrders();
                     break;
             }
         }
@@ -198,6 +251,8 @@ namespace Hrogers.TileEditorBridge
                 {
                     _operationsTool = tool;
                     _operationsPage = 0;
+                    if (tool == OperationsTool.Markers)
+                        _opsOperatingMetadataLoaded = false;
                 }
             }
             GUI.backgroundColor = oldColor;
@@ -671,6 +726,232 @@ namespace Hrogers.TileEditorBridge
             }
         }
 
+        private void DrawOperatingMarkerBuilder()
+        {
+            if (!_opsOperatingMetadataLoaded)
+            {
+                try
+                {
+                    _mapEditor.RefreshOperatingMetadata();
+                    _opsOperatingMetadataLoaded = true;
+                }
+                catch (Exception ex)
+                {
+                    _lastPanelMessage = ex.Message;
+                }
+            }
+            GUILayout.Label("AUTONOMOUS OPERATING MARKERS", _titleStyle);
+            GUILayout.Label(
+                "Markers describe operating intent without changing track "
+                + "geometry. Select the owning segment (or node for a grade "
+                + "crossing), choose a type, and place it. Railroad Operations "
+                + "loads the saved metadata on traffic.json reload.",
+                _lineStyle);
+            GUILayout.BeginHorizontal();
+            GUILayout.Label(
+                _mapEditor.OperatingMarkers.Count + " marker(s); "
+                + _mapEditor.OperatingTerritories.Count + " territory record(s)",
+                _mutedStyle);
+            if (GUILayout.Button("Refresh", GUILayout.Width(82f)))
+                RunGameAction(() =>
+                {
+                    _mapEditor.RefreshOperatingMetadata();
+                    return "Refreshed Railroad Operations metadata.";
+                });
+            GUILayout.EndHorizontal();
+
+            foreach (var marker in _mapEditor.OperatingMarkers.Take(12))
+            {
+                GUILayout.BeginHorizontal();
+                if (GUILayout.Button(marker.Id, GUILayout.Width(165f)))
+                {
+                    _opsMarkerId = marker.Id;
+                    _opsMarkerName = marker.DisplayName;
+                    _opsMarkerType = marker.MarkerType;
+                    _opsMarkerCompanyId = marker.CompanyId;
+                    _opsMarkerTargetId = marker.TargetId;
+                    _opsMarkerTargetField = marker.TargetField;
+                    _opsMarkerNativeIndustryId = marker.NativeIndustryId;
+                    _opsMarkerNativeComponentId = marker.NativeComponentId;
+                    _opsMarkerNativeComponentType = marker.NativeComponentType;
+                    _opsMarkerNativePassengerStopId =
+                        marker.NativePassengerStopId;
+                    _opsMarkerServiceIds = marker.ServiceIds;
+                    _opsMarkerSpanIds = marker.TrackSpanIds;
+                    _opsMarkerTrackGroupIds = marker.TrackGroupIds;
+                    _opsMarkerAllowedCompanyIds = marker.AllowedCompanyIds;
+                    _opsMarkerRole = marker.Role;
+                    _opsMarkerDirection = marker.Direction;
+                    _opsMarkerTolerance = marker.ToleranceMeters;
+                    _opsMarkerCapacity = marker.CapacityMeters;
+                    _opsMarkerApproach = marker.ApproachMeters;
+                    _opsMarkerDwell = marker.DwellMinutes;
+                    _opsMarkerMaxCars = marker.MaxCars;
+                    _opsMarkerNotes = marker.Notes;
+                }
+                GUILayout.Label(marker.MarkerType + "  "
+                                + (string.IsNullOrWhiteSpace(marker.Location)
+                                    ? marker.NodeId : marker.Location),
+                    _mutedStyle);
+                if (GUILayout.Button("X", GUILayout.Width(30f)))
+                    _deleteConfirmId = "ops-marker:" + marker.Id;
+                GUILayout.EndHorizontal();
+                if (_deleteConfirmId == "ops-marker:" + marker.Id)
+                {
+                    GUILayout.BeginHorizontal();
+                    GUILayout.Label("Delete " + marker.Id + "?", _offlineStyle);
+                    if (GUILayout.Button("Confirm"))
+                    {
+                        var captured = marker.Id;
+                        RunGameAction(() => _mapEditor
+                            .DeleteOperatingMarker(captured));
+                        _deleteConfirmId = string.Empty;
+                    }
+                    if (GUILayout.Button("Cancel"))
+                        _deleteConfirmId = string.Empty;
+                    GUILayout.EndHorizontal();
+                }
+            }
+            if (_mapEditor.OperatingMarkers.Count > 12)
+                GUILayout.Label("Showing 12; use the JSON file for the full list.",
+                    _mutedStyle);
+
+            GUILayout.Space(6f);
+            GUILayout.Label("MARKER DEFINITION", _titleStyle);
+            DrawTextField("Marker ID", ref _opsMarkerId);
+            DrawTextField("Display name", ref _opsMarkerName);
+            DrawTextField("Marker type", ref _opsMarkerType);
+            var selectedMarkerType = Array.FindIndex(OperatingMarkerTypes,
+                item => string.Equals(item, _opsMarkerType,
+                    StringComparison.OrdinalIgnoreCase));
+            var chosenMarkerType = GUILayout.SelectionGrid(
+                Math.Max(0, selectedMarkerType), OperatingMarkerLabels, 3);
+            if (chosenMarkerType >= 0
+                && chosenMarkerType < OperatingMarkerTypes.Length
+                && chosenMarkerType != selectedMarkerType)
+                _opsMarkerType = OperatingMarkerTypes[chosenMarkerType];
+            DrawTextField("Company ID", ref _opsMarkerCompanyId);
+            DrawTextField("Target object ID", ref _opsMarkerTargetId);
+            DrawTextField("Target stop/field ID", ref _opsMarkerTargetField);
+            if (string.Equals(_opsMarkerType, "supply-receiving",
+                    StringComparison.OrdinalIgnoreCase))
+                GUILayout.Label(
+                    "For Fuel / supply, Target stop/field ID is the native load ID: coal, diesel-fuel, repair-parts, or another commodity.",
+                    _mutedStyle);
+            if (string.Equals(_opsMarkerType, "shop-stores",
+                    StringComparison.OrdinalIgnoreCase))
+                GUILayout.Label(
+                    "For Shop stores, Target object ID is the mechanical shop ID. The native industry/component must be its real Railroader unloader.",
+                    _mutedStyle);
+            GUILayout.Label("NATIVE RAILROADER OPERATIONS BINDING", _titleStyle);
+            GUILayout.Label(
+                "Use the industry/component IDs created above. The marker "
+                + "guides the crew; Railroader's native component retains "
+                + "loading, unloading, interchange, repair, payment, and "
+                + "performance authority.", _mutedStyle);
+            DrawTextField("Native industry ID",
+                ref _opsMarkerNativeIndustryId);
+            DrawTextField("Native component ID",
+                ref _opsMarkerNativeComponentId);
+            DrawTextField("Native component type",
+                ref _opsMarkerNativeComponentType);
+            DrawTextField("Native passenger stop ID",
+                ref _opsMarkerNativePassengerStopId);
+            DrawTextField("Service IDs", ref _opsMarkerServiceIds);
+            DrawTextField("TrackSpan IDs", ref _opsMarkerSpanIds);
+            DrawTextField("Track group IDs", ref _opsMarkerTrackGroupIds);
+            DrawTextField("Allowed companies", ref _opsMarkerAllowedCompanyIds);
+            DrawTextField("Track / operating role", ref _opsMarkerRole);
+            DrawTextField("Direction / variant", ref _opsMarkerDirection);
+            DrawTextField("Tolerance (m)", ref _opsMarkerTolerance);
+            DrawTextField("Capacity (m)", ref _opsMarkerCapacity);
+            DrawTextField("Approach (m)", ref _opsMarkerApproach);
+            DrawTextField("Dwell (minutes)", ref _opsMarkerDwell);
+            DrawTextField("Maximum cars", ref _opsMarkerMaxCars);
+            DrawTextField("Notes", ref _opsMarkerNotes);
+            var selectedSegment = _mapEditor.SelectedSegment;
+            var selectedNode = _mapEditor.SelectedNode;
+            GUILayout.Label(selectedSegment == null
+                    ? "Segment: select one in the world"
+                    : "Segment: " + selectedSegment.Id + "; group "
+                      + selectedSegment.GroupId,
+                selectedSegment == null ? _offlineStyle : _onlineStyle);
+            GUILayout.Label(selectedNode == null
+                    ? "Node: select one for a crossing marker"
+                    : "Node: " + selectedNode.Id,
+                selectedNode == null ? _mutedStyle : _onlineStyle);
+            GUI.enabled = selectedSegment != null;
+            if (GUILayout.Button("PLACE PRECISE MARKER WITH POINTER",
+                    GUILayout.Height(34f)))
+                ArmPointerPlacement(PointerPlacementKind.OperationsMarker,
+                    string.Empty, false);
+            if (GUILayout.Button("SAVE FOR SELECTED TRACK / GROUP",
+                    GUILayout.Height(30f)))
+                RunGameAction(() => _mapEditor
+                    .CreateOperatingMarkerForSelectedTrack(
+                        BuildOperatingMarkerDraft()));
+            GUI.enabled = selectedNode != null;
+            if (GUILayout.Button("SAVE AT SELECTED NODE",
+                    GUILayout.Height(30f)))
+                RunGameAction(() => _mapEditor
+                    .CreateOperatingMarkerAtSelectedNode(
+                        BuildOperatingMarkerDraft()));
+            GUI.enabled = true;
+
+            GUILayout.Space(8f);
+            GUILayout.Label("TRACK OWNERSHIP & RIGHTS", _titleStyle);
+            GUILayout.Label(
+                "Territories reference the map's existing track group IDs. "
+                + "The owner and allowed companies become hard planning rules.",
+                _mutedStyle);
+            DrawTextField("Territory ID", ref _opsTerritoryId);
+            DrawTextField("Display name", ref _opsTerritoryName);
+            DrawTextField("Owner company", ref _opsTerritoryOwner);
+            DrawTextField("Track group IDs", ref _opsTerritoryGroups);
+            DrawTextField("Allowed companies", ref _opsTerritoryAllowed);
+            if (selectedSegment != null
+                && string.IsNullOrWhiteSpace(_opsTerritoryGroups)
+                && GUILayout.Button("Use selected track group"))
+                _opsTerritoryGroups = selectedSegment.GroupId;
+            if (GUILayout.Button("SAVE / UPDATE TERRITORY",
+                    GUILayout.Height(34f)))
+                RunGameAction(() => _mapEditor.SaveOperatingTerritory(
+                    _opsTerritoryId, _opsTerritoryName,
+                    _opsTerritoryOwner, _opsTerritoryGroups,
+                    _opsTerritoryAllowed));
+        }
+
+        private TileEditorGraphSession.OperatingMarkerDraft
+            BuildOperatingMarkerDraft()
+        {
+            return new TileEditorGraphSession.OperatingMarkerDraft
+            {
+                Id = _opsMarkerId,
+                DisplayName = _opsMarkerName,
+                MarkerType = _opsMarkerType,
+                CompanyId = _opsMarkerCompanyId,
+                TargetId = _opsMarkerTargetId,
+                TargetField = _opsMarkerTargetField,
+                NativeIndustryId = _opsMarkerNativeIndustryId,
+                NativeComponentId = _opsMarkerNativeComponentId,
+                NativeComponentType = _opsMarkerNativeComponentType,
+                NativePassengerStopId =
+                    _opsMarkerNativePassengerStopId,
+                ServiceIds = _opsMarkerServiceIds,
+                TrackSpanIds = _opsMarkerSpanIds,
+                TrackGroupIds = _opsMarkerTrackGroupIds,
+                AllowedCompanyIds = _opsMarkerAllowedCompanyIds,
+                Role = _opsMarkerRole,
+                Direction = _opsMarkerDirection,
+                ToleranceMeters = _opsMarkerTolerance,
+                CapacityMeters = _opsMarkerCapacity,
+                ApproachMeters = _opsMarkerApproach,
+                DwellMinutes = _opsMarkerDwell,
+                MaxCars = _opsMarkerMaxCars,
+                Notes = _opsMarkerNotes,
+            };
+        }
+
         private void DrawComponentBuilder(bool facilityDefaults)
         {
             var labels = new[]
@@ -1035,8 +1316,8 @@ namespace Hrogers.TileEditorBridge
                     return "Facilities";
                 case OperationsTool.Signals:
                     return "Signals";
-                case OperationsTool.TrainOrders:
-                    return "Train Orders";
+                case OperationsTool.Markers:
+                    return "All";
                 default:
                     return "All";
             }

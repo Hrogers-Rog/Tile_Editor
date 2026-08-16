@@ -400,9 +400,47 @@ class DrawMixin:
             draw_small_text(side_rect.x + 14, mini_y - 2, "Viewport", TEXT_COLOR)
             self._draw_minimap(self.screen, side_rect.x + 12, mini_y + 12, side_rect.width - 24, mini_h - 12)
 
+    def _draw_tile_cleanup_tile_overlay(
+            self, tile, sx, sy, disp_size, mouse_pos, preview_keys=None):
+        if not getattr(self, 'tile_delete_mode', False):
+            return
+        cr = pygame.Rect(int(sx), int(sy), disp_size, disp_size)
+        key = f'{tile.x},{tile.y}'
+        selected = key in getattr(self, 'tile_delete_selection', set())
+        if preview_keys is None:
+            preview_keys = self._tile_cleanup_preview_keys()
+        preview = key in preview_keys
+        operation = getattr(self, 'tile_delete_drag_operation', 'replace')
+        if selected:
+            tint = pygame.Surface((disp_size, disp_size), pygame.SRCALPHA)
+            tint.fill((225, 48, 48, 105))
+            self.screen.blit(tint, (int(sx), int(sy)))
+            pygame.draw.rect(self.screen, (255, 82, 72), cr, 3)
+        else:
+            pygame.draw.rect(self.screen, (75, 86, 98), cr, 1)
+        if preview:
+            preview_surf = pygame.Surface(
+                (disp_size, disp_size), pygame.SRCALPHA
+            )
+            if operation == 'subtract':
+                preview_surf.fill((45, 210, 130, 95))
+                preview_color = (85, 255, 170)
+            else:
+                preview_surf.fill((255, 176, 45, 90))
+                preview_color = (255, 200, 70)
+            self.screen.blit(preview_surf, (int(sx), int(sy)))
+            pygame.draw.rect(self.screen, preview_color, cr, 3)
+        elif cr.collidepoint(*mouse_pos):
+            pygame.draw.rect(self.screen, (255, 225, 120), cr, 3)
+
 
     def _draw_terrain(self, w, h, content_top, ts, draw_min_x, draw_max_x, draw_min_y, draw_max_y):
         """Grid, tile images, OSM overlay, generation placeholders."""
+        cleanup_preview_keys = (
+            self._tile_cleanup_preview_keys()
+            if getattr(self, 'tile_delete_mode', False)
+            else set()
+        )
         # ---- Grid ----
         if ts > 8:
             for tx in range(draw_min_x, draw_max_x + 2):
@@ -473,18 +511,19 @@ class DrawMixin:
                     (int(sx) + 1, int(sy) + 1, max(1, disp_size - 2), max(1, disp_size - 2)),
                     1,
                 )
+                self._draw_tile_cleanup_tile_overlay(
+                    tile, sx, sy, disp_size, (mx0, my0),
+                    cleanup_preview_keys,
+                )
                 continue
             scaled = tile.get_scaled_overview(self.mode, self.hillshade, disp_size, allow_render=False)
             self.screen.blit(scaled, (int(sx), int(sy)))
 
-            # Delete mode: red tint on hover, red border on all tiles
-            if getattr(self, 'tile_delete_mode', False):
-                cr = pygame.Rect(int(sx), int(sy), disp_size, disp_size)
-                if cr.collidepoint(mx0, my0):
-                    tint = pygame.Surface((disp_size, disp_size), pygame.SRCALPHA)
-                    tint.fill((220, 50, 50, 100))
-                    self.screen.blit(tint, (int(sx), int(sy)))
-                pygame.draw.rect(self.screen, (180, 50, 50), cr, 2)
+            # Red = marked for deletion; green = keep/remove preview; amber = add.
+            self._draw_tile_cleanup_tile_overlay(
+                tile, sx, sy, disp_size, (mx0, my0),
+                cleanup_preview_keys,
+            )
 
             # Diff overlay: tint modified tiles orange-amber
             if self.diff_mode and tile.dirty and disp_size > 4:
@@ -1941,6 +1980,7 @@ class DrawMixin:
         x = 8
         panel_specs = [
             ("Generate", "toggle_generate", self.gen_panel, OK_COLOR, True),
+            ("Tile Cleanup", "toggle_tile_cleanup", self.tile_delete_mode, WARN_COLOR, bool(self.tiles)),
             ("Mod", "toggle_mod", self.mod_panel, (160, 100, 255), True),
             ("Towns", "open_areas", self.area_panel, (100, 200, 140), bool(self.mod_project)),
             ("Progress", "open_progression", self.prog_panel, (255, 140, 0), bool(self.mod_project)),
@@ -1993,6 +2033,93 @@ class DrawMixin:
                 self.font.render_to(self.screen, (status_x, row2_y + 5), status_text, status_color)
                 break
 
+
+    def _draw_tile_cleanup_panel(self, w, h, content_top, mx0, my0):
+        """Compact controls for selecting and recoverably deleting map tiles."""
+        self._tile_cleanup_rects = []
+        if not getattr(self, 'tile_delete_mode', False):
+            return
+
+        panel_w = min(max(760, w - 40), 1100)
+        panel_h = 104
+        panel_x = max(10, (w - panel_w) // 2)
+        panel_y = content_top + 10
+        panel_rect = pygame.Rect(panel_x, panel_y, panel_w, panel_h)
+        self._tile_cleanup_panel_rect = panel_rect
+        panel = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
+        panel.fill((8, 12, 19, 242))
+        self.screen.blit(panel, panel_rect.topleft)
+        pygame.draw.rect(
+            self.screen, (226, 73, 65), panel_rect, 2, border_radius=8
+        )
+
+        selected_count = len(
+            set(getattr(self, 'tile_delete_selection', set())) & set(self.tiles)
+        )
+        title = f"TILE CLEANUP  |  {selected_count} MARKED FOR DELETION"
+        self.font_big.render_to(
+            self.screen, (panel_x + 12, panel_y + 8), title,
+            (255, 112, 96) if selected_count else TEXT_COLOR,
+        )
+        hint = (
+            "Drag = replace selection   Shift+drag = add   "
+            "Ctrl+drag or right-drag = keep/remove   MMB = pan"
+        )
+        self.font.render_to(
+            self.screen, (panel_x + 12, panel_y + 29), hint, TEXT_SOFT
+        )
+
+        button_y = panel_y + 48
+        gap = 7
+        specs = [
+            ("EXIT", 'cleanup_exit', 62, ACCENT_COLOR, True),
+            ("CLEAR", 'cleanup_clear', 72, DIM_COLOR, selected_count > 0),
+            ("SELECT ALL", 'cleanup_all', 104, WARN_COLOR, bool(self.tiles)),
+            ("INVERT / OUTSIDE ROW", 'cleanup_invert', 174, OK_COLOR, bool(self.tiles)),
+        ]
+        delete_label = (
+            f"CONFIRM MOVE {selected_count} TO RECOVERY"
+            if getattr(self, 'tile_delete_confirm', False)
+            else f"DELETE {selected_count} MARKED TILES"
+        )
+        fixed_width = sum(item[2] for item in specs) + gap * len(specs)
+        delete_width = max(220, panel_w - 24 - fixed_width)
+        specs.append((
+            delete_label, 'cleanup_delete', delete_width, (255, 76, 62),
+            selected_count > 0,
+        ))
+
+        bx = panel_x + 12
+        for label, action, bw, color, enabled in specs:
+            rect = pygame.Rect(bx, button_y, bw, 29)
+            hover = enabled and rect.collidepoint(mx0, my0)
+            if enabled:
+                fill = BTN_HOVER_C if hover else BTN_INACTIVE
+                border = color
+                text_color = TEXT_COLOR if hover else color
+            else:
+                fill = (19, 24, 31)
+                border = (47, 54, 64)
+                text_color = (83, 91, 102)
+            pygame.draw.rect(self.screen, fill, rect, border_radius=5)
+            pygame.draw.rect(self.screen, border, rect, 1, border_radius=5)
+            text_surf, _ = self.font.render(label, text_color)
+            self.screen.blit(
+                text_surf,
+                (rect.x + (rect.width - text_surf.get_width()) // 2,
+                 rect.y + (rect.height - text_surf.get_height()) // 2),
+            )
+            if enabled:
+                self._tile_cleanup_rects.append((rect, action))
+            bx = rect.right + gap
+
+        footer = (
+            "ROW shortcut: mark tiles along the right-of-way, then click "
+            "INVERT / OUTSIDE ROW. Deleted files remain recoverable; Ctrl+Z restores."
+        )
+        self.font.render_to(
+            self.screen, (panel_x + 12, panel_y + 84), footer, DIM_COLOR
+        )
 
     def _draw_toolbar(self, w, h, content_top, mx0, my0):
         """Edit-mode toolbar: brush controls, selection tools, strength/size."""
@@ -2214,14 +2341,23 @@ class DrawMixin:
         }
         mode_label = {'height': 'Heightmap', 'veg': 'Vegetation', 'water': 'Water'}.get(self.mode, self.mode)
         shell_label = section_map.get(self._shell_active_section(), 'Canvas')
-        left_text = f"{shell_label}  |  {mode_label}  |  {'Edit' if self.edit_mode else 'View'}"
+        work_mode = (
+            'Tile Cleanup' if getattr(self, 'tile_delete_mode', False)
+            else ('Edit' if self.edit_mode else 'View')
+        )
+        left_text = f"{shell_label}  |  {mode_label}  |  {work_mode}"
         if self.mod_project:
             left_text += f"  |  {self.mod_project.name}"
         lr, _ = self.font.render(left_text, TEXT_COLOR)
         self.screen.blit(lr, (10, h - STATUS_H + (STATUS_H - lr.get_height()) // 2))
 
         # Middle: contextual hint
-        if self.edit_mode:
+        if getattr(self, 'tile_delete_mode', False):
+            hint = (
+                "Drag box | Shift add | Ctrl/right-drag keep | "
+                "Select ROW then Invert | Delete moves files to recovery"
+            )
+        elif self.edit_mode:
             if self.mode == 'height':
                 hints = {
                     'raise':   "LMB Raise  |  RMB Lower  |  MMB Sample  |  B cycle brush",

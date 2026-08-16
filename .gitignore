@@ -16,3 +16,10 @@ build/
 dist/
 
 *.zip
+
+# .NET build output
+[Bb]in/
+[Oo]bj/
+
+# Local validation artifacts
+tmp/
