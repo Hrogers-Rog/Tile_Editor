@@ -112,3 +112,22 @@ python -m edit_tiles
 - This is a **source repo** — packaged release archives are uploaded as GitHub
   releases rather than tracked here.
 - OSM and Mapbox data come from third-party services under their own terms.
+
+## License
+
+Copyright (C) 2026 Hunter Rogers and contributors.
+
+Railroader Tile Editor is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published by the
+Free Software Foundation, either version 3 of the License, or (at your option)
+any later version.
+
+Railroader Tile Editor is distributed in the hope that it will be useful, but
+WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for
+more details.
+
+The full license text is in [`LICENSE`](LICENSE). The AGPL covers this project's
+original source. Railroader, Unity, Unity Mod Manager, third-party assets and
+dependencies, external map data, and reference or decompiled material under
+`.tmp_sc_decompile/` remain under their respective terms.
