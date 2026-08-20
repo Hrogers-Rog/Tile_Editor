@@ -23,9 +23,12 @@ namespace Hrogers.TileEditorBridge
             OperationsTown,
             OperationsIndustry,
             OperationsPhysicalLoader,
+            OperationsToolshedFacility,
             OperationsStationAgent,
             OperationsTurntable,
             OperationsMarker,
+            OperationsMoveSelected,
+            WaterSurface,
         }
 
         private readonly RaycastHit[] _pointerRaycastHits =
@@ -229,8 +232,31 @@ namespace Hrogers.TileEditorBridge
                                     _newSplineWidth,
                                     "new spline width")
                                 : 0f;
-                            var splineId =
-                                _mapEditor.CreateSplineyBetweenPositions(
+                            var splineId = _newSplineKind == 3
+                                ? _mapEditor.CreateObjectLineBetweenPositions(
+                                    _newSplineName,
+                                    SelectedObjectLineAssetIdentifier(),
+                                    SelectedObjectLinePrefab(),
+                                    _newSplineFirstPoint,
+                                    splinePoint,
+                                    ParseFloat(
+                                        _objectLineSpacing,
+                                        "object spacing"),
+                                    ParseObjectLineScale(),
+                                    ParseObjectLineRotation(),
+                                    ParseFloat(
+                                        _objectLineLateralOffset,
+                                        "lateral offset"),
+                                    ParseFloat(
+                                        _objectLineVerticalOffset,
+                                        "vertical offset"),
+                                    _objectLineSnapToTerrain,
+                                    _objectLineAlignToSlope,
+                                    _objectLinePlaceAtEnd,
+                                    ParseInt(
+                                        _objectLineMaximumInstances,
+                                        "maximum instances"))
+                                : _mapEditor.CreateSplineyBetweenPositions(
                                     _newSplineName,
                                     _pointerPlacementPayload,
                                     _newSplineProfile,
@@ -322,13 +348,58 @@ namespace Hrogers.TileEditorBridge
                             _opsUsesContract);
                         break;
                     case PointerPlacementKind.OperationsPhysicalLoader:
-                        result = _mapEditor.CreatePhysicalLoader(
+                        result = _mapEditor.CreatePhysicalLoaderSnapped(
                             _opsPhysicalLoaderId,
                             _opsPhysicalLoaderPrefab,
                             _opsIndustryId,
                             WorldTransformer.WorldToGame(
                                 worldPosition),
-                            yaw);
+                            yaw,
+                            _opsPhysicalLoaderSnapToTrack,
+                            _mapEditor.SelectedSegment?.Id,
+                            ParseFloat(
+                                _opsPhysicalLoaderSideOffset,
+                                "loader distance from track"),
+                            ParseFloat(
+                                _opsPhysicalLoaderAlongOffset,
+                                "loader distance along track"),
+                            ParseFloat(
+                                _opsPhysicalLoaderVerticalOffset,
+                                "loader vertical offset"),
+                            ParseFloat(
+                                _opsPhysicalLoaderHeadingOffset,
+                                "loader heading adjustment"),
+                            _opsPhysicalLoaderRightSide);
+                        break;
+                    case PointerPlacementKind.OperationsToolshedFacility:
+                        result = _mapEditor
+                            .CreateToolshedServiceFacilitySnapped(
+                                _opsToolshedFacilityId,
+                                _opsPhysicalLoaderId,
+                                _opsPhysicalLoaderPrefab,
+                                _opsToolshedLoadPointId,
+                                _opsToolshedServiceLoadId,
+                                _opsIndustryId,
+                                _opsToolshedSpanIds,
+                                _opsToolshedRequireAuthoredLoadPoints,
+                                WorldTransformer.WorldToGame(
+                                    worldPosition),
+                                yaw,
+                                _opsPhysicalLoaderSnapToTrack,
+                                _mapEditor.SelectedSegment?.Id,
+                                ParseFloat(
+                                    _opsPhysicalLoaderSideOffset,
+                                    "loader distance from track"),
+                                ParseFloat(
+                                    _opsPhysicalLoaderAlongOffset,
+                                    "loader distance along track"),
+                                ParseFloat(
+                                    _opsPhysicalLoaderVerticalOffset,
+                                    "loader vertical offset"),
+                                ParseFloat(
+                                    _opsPhysicalLoaderHeadingOffset,
+                                    "loader heading adjustment"),
+                                _opsPhysicalLoaderRightSide);
                         break;
                     case PointerPlacementKind.OperationsStationAgent:
                         result = _mapEditor.CreateStationAgent(
@@ -372,6 +443,32 @@ namespace Hrogers.TileEditorBridge
                             BuildOperatingMarkerDraft(),
                             WorldTransformer.WorldToGame(worldPosition));
                         _opsOperatingMetadataLoaded = false;
+                        break;
+                    case PointerPlacementKind.OperationsMoveSelected:
+                        result = _mapEditor.MoveSelectedOperationTo(
+                            WorldTransformer.WorldToGame(worldPosition));
+                        break;
+                    case PointerPlacementKind.WaterSurface:
+                        var waterCenter = WorldTransformer.WorldToGame(worldPosition);
+                        if (!string.IsNullOrWhiteSpace(_waterHeight))
+                            waterCenter.y = ParseFloat(_waterHeight, "water elevation");
+                        result = _mapEditor.CreateWaterSurfaceRectangle(
+                            _waterId,
+                            waterCenter,
+                            yaw,
+                            ParseFloat(_waterWidth, "water width"),
+                            ParseFloat(_waterLength, "water length"),
+                            _waterSourcePath,
+                            _waterMaterialName,
+                            _waterLockHeight,
+                            _waterSnapToTerrain,
+                            _waterEnableCollider,
+                            ParseFloat(_waterUvScale, "water UV scale"),
+                            ParseFloat(_waterTriangleDensity, "water triangle density"),
+                            ParseFloat(_waterMaximumTriangleArea, "water maximum triangle area"),
+                            ParseFloat(_waterYOffset, "water vertical offset"));
+                        _selectedWaterId = _waterId;
+                        _waterLoadedId = string.Empty;
                         break;
                     default:
                         return;

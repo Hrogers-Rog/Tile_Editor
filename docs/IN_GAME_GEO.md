@@ -7,6 +7,12 @@ It does not use Alina's Map Editor, and it can select and remember an installed
 RailLoader mod or game-graph by itself — **the desktop Tile Editor does not need to
 be running.**
 
+If there is no map package yet, choose **Change Mod / Graph → Create New Mod**.
+F9 can create either the recommended single-graph package that works in FUSE and
+RailLoader, or a native FUSE `Info.json` + `map.fuse.json` package, then opens the
+new edit layer immediately. Neither choice adds Strange Customs or Alina as a
+dependency.
+
 ## Mouse Handling
 
 While F9 is open the mouse is reserved for editing. Railroader's pan, orbit, look,
@@ -26,7 +32,7 @@ stuck.
 
 | Workspace | Covers |
 | --- | --- |
-| **Geo** | Nodes, segments, grades, pieces, arcs, parallel track, fitted arcs, turnouts, wyes, splineys |
+| **Geo** | Nodes, segments, grades, pieces, arcs, parallel track, fitted arcs, turnouts, wyes, splineys, native water surfaces |
 | **Terrain** | Sculpting, plus vegetation and water painting, and the OSM guide |
 | **Scenery** | Searchable asset palette, placement, transforms, terrain snapping |
 | **Objects** | Base-game buildings and props → portable mandelas |
@@ -129,6 +135,51 @@ the next bridge afterwards.
 Road, river, bridge, and trestle control points show movement plus full
 pitch/heading/roll together, using the same arrow controls and precision steps as
 track nodes and scenery.
+
+Native FUSE projects also show **Fence / Wall**. It repeats a loaded scenery
+asset (or advanced safe scene prefab) along editable points without stretching
+the model. Spacing, scale, model rotation, side/height offsets, terrain snap,
+slope alignment, endpoint placement, and an instance safety cap are editable
+live. The purple point handles survive each runtime rebuild. Legacy RailLoader
+mode shows the feature disabled because its spline schema cannot store it.
+
+## Water Surfaces
+
+**Geo → Water** authors the visible lake polygon; **Terrain → Water** paints only
+the terrain water mask. In a native FUSE project, place a rectangular lake with
+the pointer, then edit, insert, or remove boundary points and tune height lock,
+terrain snapping, collider, UV scale, tessellation, and vertical offset.
+
+The workspace lists stock `LakePolygon` objects. **Use as Material Source**
+borrows a stock lake's profile/material without copying assets. **Replace with
+Editable Copy** adds the native surface and records the exact base scene path as
+a suppression. Undo/redo and document reload reapply the live FUSE surface.
+
+Legacy mode keeps the form visible but disabled because RailLoader JSON cannot
+represent this feature.
+
+The water material (and therefore its normal/reflection behavior) is reused from
+the selected stock `LakePolygon` or named loaded material. FUSE regenerates the
+new boundary's mesh and flow map, retains the source lake's public rendering and
+flow profile, and releases superseded meshes after live edits. Water-mask paint
+does not create a visible lake plane; use both tools when the terrain and visible
+surface must agree.
+
+## Vegetation Presets And Persistence
+
+Surface Paint names all eight vegetation-density levels from **Full (0, 100%)**
+through **Clear (7, 0%)**. The selected level includes its approximate mask
+strength and a practical example such as dense forest, woodland, mixed cover,
+open grass, pasture/crops, or cleared ground. These are not fixed biomes: track,
+water, objects, slope, cut-tree masks, and the active density graph can still
+suppress individual plants. The number remains visible because it is the exact
+three-bit value stored in Railroader's terrain tile.
+
+Painting updates the live texture and marks the owning tile dirty. Save writes
+the tile atomically, registers a FUSE override when the source is read-only,
+invalidates Railroader's terrain cache, and reports the exact saved paths to the
+desktop editor. Rebuild and desktop reload are blocked while either editor owns
+unsaved terrain changes, preventing a stale cache from replacing vegetation.
 
 ## Operations
 

@@ -52,6 +52,34 @@ Press `V` for vegetation mode, `W` for water.
 In vegetation mode, keys **`0`–`7`** select the preset to paint. Water mode paints
 the water mask — white is water, black is land.
 
+The preset is a vegetation-density level, not a fixed biome:
+
+| ID | Density | Approx. mask | Typical use |
+| --- | --- | --- | --- |
+| 0 | Full | 100% | Dense forest and maximum plant placement |
+| 1 | Very Dense | 86% | Woodland or other very dense cover |
+| 2 | Dense | 71% | Trees and brush with small openings |
+| 3 | Medium | 57% | Balanced mixed vegetation and open ground |
+| 4 | Light | 43% | Grass, shrubs, and scattered trees |
+| 5 | Sparse | 29% | Mostly open grass or ground |
+| 6 | Minimal | 14% | Pasture, cropland, and lightly planted yards |
+| 7 | Clear | 0% | Built-up, bare, snow, or open-water ground |
+
+Those are placement-mask strengths. The game's vegetation graph can still
+suppress individual plants around track, water, objects, steep slopes, and
+cut-tree masks. Generated land-cover data maps source classes onto these levels;
+it does not store an ecological class in the tile.
+
+The water mask does not draw a visible lake plane. For that, open **F9 → Geo →
+Water** in a native FUSE project. The Water workspace can place a rectangular
+surface with the world pointer, edit every polygon boundary point, reuse the
+material/profile from a loaded stock lake, and replace a stock lake with an
+editable FUSE-owned copy. Collider, terrain snapping, UV scale, tessellation,
+and vertical offset are explicit fields.
+
+RailLoader has no equivalent lake-polygon schema, so these controls are visibly
+disabled in legacy mode instead of writing data that would be lost on export.
+
 ## Selection
 
 Press **`M`** in edit mode.
@@ -85,6 +113,16 @@ Open the **Generate** panel to build terrain from real-world data.
 | **Run** | Generate everything queued |
 
 Queue the whole area first, then Run once — generation is the slow part.
+
+Tile bounds come from the nearest `Map.json`: `origin.latitude`,
+`origin.longitude`, and `tileDimension`. Standalone native projects create this
+file during the New Mod wizard, so elevation, vegetation, and OSM alignment are
+not tied to the stock map. Existing legacy tile folders without a manifest use
+the stock-map defaults for compatibility.
+
+After generation, the editor atomically synchronizes `Map.json.tiles` with the
+tile files actually present on disk. Tile cleanup and undo do the same, so a map
+package cannot silently advertise deleted terrain or omit restored terrain.
 
 ## Tile Cleanup
 
@@ -129,13 +167,16 @@ those before redistributing anything derived from them.
 ## In-Game Terrain Workspace
 
 The F9 Terrain workspace separates practical sculpting from vegetation and water
-painting. Its building-pad, track/road, walkway, grade-plane, ditch, and
+mask painting. The separate **Geo → Water** workspace creates the visible water
+surface. Terrain's building-pad, track/road, walkway, grade-plane, ditch, and
 embankment tools use bounded cut/fill with target convergence, specifically to
 avoid the spikes a naive flatten produces.
 
 ## Saving
 
-`Ctrl+S` saves all modified tiles. `Ctrl+X` exports the heightmap as a PNG.
+`Ctrl+S` saves all modified tiles atomically, keeps up to three recoverable
+per-tile backups, and clears every derived render cache only after the new file
+has replaced the old one. `Ctrl+X` exports the heightmap as a PNG.
 Press `D` for diff mode to see exactly which tiles are unsaved — they carry a
 yellow border.
 

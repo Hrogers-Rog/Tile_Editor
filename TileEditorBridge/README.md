@@ -1,4 +1,4 @@
-# Hrogers Tile Editor Suite 0.26.4
+# Hrogers Tile Editor Suite 0.26.8
 
 Hold **Shift+?** in F9 for a live pointer survey showing map/game, Unity
 world, graph-local, terrain-tile, and tile-local coordinates plus the nearest
@@ -140,6 +140,15 @@ desktop Tile Editor.
   `Change Mod / Graph` chooser. Its recommended main graph is selected by
   default; every individual mixinto remains available under `More Layers`.
   The chosen layer is remembered and automatically reopened later.
+- **Create New Mod** is available in that F9 chooser even when the desktop editor
+  is not installed or running. Native FUSE is recommended; choose a stock-map
+  add-on or a standalone map with its own origin. Standalone creation writes
+  `Info.json`, `map.fuse.json`, and `Map/Map.json`, including the native map
+  declaration that suppresses the stock world. Return to the main menu and
+  launch that registered map before authoring its empty world. The legacy option
+  creates `Definition.json` + `game-graph.json` and disables native-only choices.
+  New packages never add Strange Customs or Alina dependencies, and existing
+  folders are not overwritten.
 - The chooser also recognizes native FUSE `Info.json` `FuseDataFiles`.
   Editing a `.fuse.json` track fragment preserves FUSE endpoint names,
   operation data, and native removal lists.

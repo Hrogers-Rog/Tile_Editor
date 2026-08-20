@@ -3,6 +3,7 @@ Layer class — one JSON file inside a mod (or the base game file).
 """
 
 import copy as _copy
+import base64
 import json
 import re
 import shutil
@@ -196,6 +197,211 @@ class Layer:
             return 'fuse'
         return 'legacy'
 
+    @property
+    def is_fuse_native(self) -> bool:
+        """Whether this layer is a native FUSE schema document."""
+        return self.track_schema == 'fuse'
+
+    def raw_collection(self, name: str, create: bool = False) -> dict:
+        """Return the format-correct raw dictionary for an editor concept.
+
+        The desktop editor keeps one format-neutral in-memory view, but native
+        FUSE does not use RailLoader's root-level scenery/spliney/area blocks.
+        All mutations must pass through this adapter so the format switch is a
+        real serializer choice rather than a different file extension.
+        """
+        if not self.is_fuse_native:
+            value = self._raw.get(name)
+            if isinstance(value, dict):
+                return value
+            if not create:
+                return {}
+            value = {}
+            self._raw[name] = value
+            return value
+
+        if name == 'areas':
+            parent = self._raw.get('tracks')
+            if not isinstance(parent, dict):
+                if not create:
+                    return {}
+                parent = {}
+                self._raw['tracks'] = parent
+            value = parent.get('areas')
+        elif name == 'loads':
+            parent = self._raw.get('operations')
+            if not isinstance(parent, dict):
+                if not create:
+                    return {}
+                parent = {}
+                self._raw['operations'] = parent
+            value = parent.get('loads')
+        elif name == 'industries':
+            parent = self._raw.get('operations')
+            if not isinstance(parent, dict):
+                if not create:
+                    return {}
+                parent = {}
+                self._raw['operations'] = parent
+            value = parent.get('industries')
+        else:
+            native_names = {
+                'scenery': 'scenery',
+                'splineys': 'splineys',
+                'mandelas': 'sceneClones',
+                'texts': 'mapLabels',
+                'simpleGraphs': None,
+            }
+            native_name = native_names.get(name, name)
+            if native_name is None:
+                extensions = self._raw.get('extensions')
+                if not isinstance(extensions, dict):
+                    if not create:
+                        return {}
+                    extensions = {}
+                    self._raw['extensions'] = extensions
+                value = extensions.get('simpleGraphs')
+                parent = extensions
+                native_name = 'simpleGraphs'
+            else:
+                parent = self._raw.get('world')
+                if not isinstance(parent, dict):
+                    if not create:
+                        return {}
+                    parent = {}
+                    self._raw['world'] = parent
+                value = parent.get(native_name)
+
+        if isinstance(value, dict):
+            return value
+        if not create:
+            return {}
+        value = {}
+        parent[native_name if name not in ('areas', 'loads', 'industries')
+               else name] = value
+        return value
+
+    @staticmethod
+    def scene_clone_id(target_path: str) -> str:
+        encoded = base64.urlsafe_b64encode(
+            str(target_path or '').strip().encode('utf-8')
+        ).decode('ascii').rstrip('=')
+        return f'scene-{encoded}'
+
+    def find_scene_clone_key(self, target_path: str) -> Optional[str]:
+        target_path = str(target_path or '').strip()
+        if not self.is_fuse_native:
+            return target_path if target_path in self.raw_collection('mandelas') else None
+        for key, value in self.raw_collection('mandelas').items():
+            if isinstance(value, dict) and str(value.get('targetPath', '')).strip() == target_path:
+                return key
+        return None
+
+    def add_world_removal(self, kind: str, object_id: str):
+        if not self.is_fuse_native or not object_id:
+            return
+        world = self._raw.setdefault('world', {})
+        removals = world.setdefault('removals', {})
+        values = removals.setdefault(kind, [])
+        if object_id not in values:
+            values.append(object_id)
+
+    def remove_world_removal(self, kind: str, object_id: str):
+        if not self.is_fuse_native or not object_id:
+            return
+        values = (((self._raw.get('world') or {}).get('removals') or {})
+                  .get(kind))
+        if isinstance(values, list):
+            values[:] = [value for value in values if value != object_id]
+
+    @staticmethod
+    def spliney_for_editor(entry: dict) -> dict:
+        result = _copy.deepcopy(entry or {})
+        native_type = str(result.get('type', '')).strip().lower()
+        if native_type == 'trestle':
+            result.setdefault('handler', 'StrangeCustoms.AutoTrestleBuilder')
+            if 'headStyle' in result:
+                result.setdefault('headstyle', result['headStyle'])
+            if 'tailStyle' in result:
+                result.setdefault('tailstyle', result['tailStyle'])
+        elif native_type:
+            result.setdefault('handler', 'StrangeCustoms.FlowyThingBuilder')
+            result.setdefault('style', 'River' if native_type in ('river', 'waterfall') else 'Road')
+        return result
+
+    @staticmethod
+    def spliney_for_native(entry: dict) -> dict:
+        source = _copy.deepcopy(entry or {})
+        handler = str(source.pop('handler', source.pop('Handler', '')))
+        native_type = str(source.get('type', '')).strip()
+        if not native_type:
+            if 'AutoTrestle' in handler:
+                native_type = 'trestle'
+            else:
+                style = str(source.get('style', 'Road')).strip().lower()
+                native_type = 'river' if style == 'river' else 'road'
+        source['type'] = native_type
+        if 'headstyle' in source:
+            source['headStyle'] = source.pop('headstyle')
+        if 'tailstyle' in source:
+            source['tailStyle'] = source.pop('tailstyle')
+        allowed = {
+            'type', 'profile', 'style', 'offsetY', 'headStyle',
+            'tailStyle', 'points',
+        }
+        return {key: value for key, value in source.items() if key in allowed}
+
+    @staticmethod
+    def scenery_for_editor(entry: dict) -> dict:
+        result = _copy.deepcopy(entry or {})
+        identifier = result.get('assetIdentifier', result.get('model', ''))
+        if isinstance(identifier, str) and identifier.startswith('scenery://'):
+            identifier = identifier[len('scenery://'):]
+        result['modelIdentifier'] = identifier
+        return result
+
+    @staticmethod
+    def scenery_for_native(entry: dict) -> dict:
+        source = _copy.deepcopy(entry or {})
+        identifier = str(source.pop(
+            'modelIdentifier', source.pop('model', source.get('assetIdentifier', ''))
+        ) or '').strip()
+        if '://' not in identifier:
+            identifier = 'scenery://' + identifier
+        source['assetIdentifier'] = identifier
+        allowed = {
+            'assetIdentifier', 'position', 'rotation', 'scale',
+            'anchorSpanIds',
+        }
+        return {key: value for key, value in source.items() if key in allowed}
+
+    @staticmethod
+    def mandela_for_editor(target_path: str, entry: dict) -> dict:
+        result = _copy.deepcopy(entry or {})
+        result.pop('targetPath', None)
+        source = str(result.pop('source', '') or '')
+        prefix = 'path://scene/'
+        if source.lower().startswith(prefix):
+            source = source[len(prefix):]
+        if source:
+            result['instantiateFrom'] = source
+        return result
+
+    @staticmethod
+    def mandela_for_native(target_path: str, entry: dict) -> dict:
+        source = _copy.deepcopy(entry or {})
+        instantiate_from = str(source.pop('instantiateFrom', '') or '').strip()
+        result = {'targetPath': str(target_path or '').strip()}
+        if instantiate_from:
+            result['source'] = (
+                instantiate_from if '://' in instantiate_from
+                else 'path://scene/' + instantiate_from
+            )
+        for key in ('enabled', 'localPosition', 'localRotation', 'localScale'):
+            if key in source:
+                result[key] = source[key]
+        return result
+
     def _check_patch_operators(self):
         """Warn if this file uses StrangeCustoms patch operators ($find, $replace, etc.).
 
@@ -222,14 +428,42 @@ class Layer:
 
         self.nodes    = {}
         self.segments = {}
-        self.spans    = _copy.deepcopy(dict(raw_spans))
-        self.splineys = _copy.deepcopy(d.get('splineys', {}) or {})
-        self.areas    = _copy.deepcopy(d.get('areas', {}) or {})
-        self.scenery  = _copy.deepcopy(d.get('scenery', {}) or {})
-        self.mandelas     = _copy.deepcopy(d.get('mandelas', {}) or {})
-        self.texts        = _copy.deepcopy(d.get('texts', {}) or {})
-        self.simpleGraphs = _copy.deepcopy(d.get('simpleGraphs', {}) or {})
-        self.loads        = _copy.deepcopy(d.get('loads', {}) or {})
+        self.spans = _copy.deepcopy(dict(raw_spans))
+        if self.is_fuse_native:
+            self.splineys = {
+                key: self.spliney_for_editor(value)
+                for key, value in self.raw_collection('splineys').items()
+                if isinstance(value, dict)
+            }
+            self.areas = _copy.deepcopy(self.raw_collection('areas'))
+            self.scenery = {
+                key: self.scenery_for_editor(value)
+                for key, value in self.raw_collection('scenery').items()
+                if isinstance(value, dict)
+            }
+            self.mandelas = {}
+            for key, value in self.raw_collection('mandelas').items():
+                if not isinstance(value, dict):
+                    continue
+                target_path = str(value.get('targetPath', '') or '').strip()
+                if target_path:
+                    self.mandelas[target_path] = self.mandela_for_editor(
+                        target_path, value
+                    )
+            self.texts = _copy.deepcopy(self.raw_collection('texts'))
+            self.simpleGraphs = _copy.deepcopy(
+                self.raw_collection('simpleGraphs')
+            )
+            self.loads = _copy.deepcopy(self.raw_collection('loads'))
+            self._merge_native_industries_into_areas()
+        else:
+            self.splineys = _copy.deepcopy(d.get('splineys', {}) or {})
+            self.areas = _copy.deepcopy(d.get('areas', {}) or {})
+            self.scenery = _copy.deepcopy(d.get('scenery', {}) or {})
+            self.mandelas = _copy.deepcopy(d.get('mandelas', {}) or {})
+            self.texts = _copy.deepcopy(d.get('texts', {}) or {})
+            self.simpleGraphs = _copy.deepcopy(d.get('simpleGraphs', {}) or {})
+            self.loads = _copy.deepcopy(d.get('loads', {}) or {})
 
         for nid, v in raw_nodes.items():
             if v is None:
@@ -248,6 +482,7 @@ class Layer:
                     'rotY':          float(rot.get('y', 0)),
                     'rotZ':          float(rot.get('z', 0)),
                     'flipSwitchStand': bool(v.get('flipSwitchStand', False)),
+                    'isDiamond': bool(v.get('isDiamond', v.get('IsDiamond', False))),
                 }
 
         for sid, v in raw_segs.items():
@@ -277,7 +512,49 @@ class Layer:
                     'gauge':      normalize_track_gauge(
                         v.get('gauge', v.get('Gauge', 'Standard'))
                     ),
+                    'bridgeSupportsSteel': bool(v.get('bridgeSupportsSteel', False)),
+                    'yard': bool(v.get('yard', False)),
                 }
+
+    def _merge_native_industries_into_areas(self):
+        """Expose native operations industries through the legacy-neutral UI."""
+        for industry_id, industry in self.raw_collection('industries').items():
+            if not isinstance(industry, dict):
+                continue
+            area_id = str(industry.get('areaId', '') or '').strip()
+            if not area_id:
+                continue
+            area = self.areas.setdefault(area_id, {
+                'name': area_id,
+                'position': {'x': 0.0, 'y': 0.0, 'z': 0.0},
+                'radius': 500.0,
+                'order': 0,
+                'tagColor': [0.5, 0.5, 0.5],
+            })
+            area_position = area.get('position') or {}
+            position = industry.get('position') or {}
+            local_position = {
+                axis: float(position.get(axis, 0.0))
+                      - float(area_position.get(axis, 0.0))
+                for axis in ('x', 'y', 'z')
+            }
+            components = {}
+            for component_id, component in (
+                    industry.get('components') or {}).items():
+                if not isinstance(component, dict):
+                    continue
+                editor_component = _copy.deepcopy(component)
+                if 'trackSpanIds' in editor_component:
+                    editor_component['trackSpans'] = editor_component.pop(
+                        'trackSpanIds'
+                    )
+                components[component_id] = editor_component
+            area.setdefault('industries', {})[industry_id] = {
+                'name': industry.get('name', industry_id),
+                'localPosition': local_position,
+                'usesContract': bool(industry.get('usesContract', False)),
+                'components': components,
+            }
 
     def rebuild_curves(self, all_nodes: dict):
         """Rebuild bezier curves using the merged node positions."""
@@ -328,7 +605,7 @@ class Layer:
     # ------------------------------------------------------------------
     def set_node(self, nid: str, x: float, y: float, z: float,
                  rotX: float, rotY: float, rotZ: float,
-                 flip: bool = False):
+                 flip: bool = False, is_diamond: Optional[bool] = None):
         """Add or update a node in this layer."""
         if self.read_only:
             return
@@ -351,20 +628,38 @@ class Layer:
         # Clamp Y to reasonable terrain range (prevents nodes at sea level or underground)
         if y == 0.0:
             y = 0.0  # allow 0 as valid (sea level maps exist)
+        existing_node = self.nodes.get(nid, {})
+        existing_raw = (
+            ((self._raw.get('tracks') or {}).get('nodes') or {}).get(nid)
+        )
+        if is_diamond is None:
+            is_diamond = bool(existing_node.get('isDiamond', False))
+            if isinstance(existing_raw, dict):
+                is_diamond = bool(existing_raw.get(
+                    'isDiamond', existing_raw.get('IsDiamond', is_diamond)
+                ))
         self.nodes[nid] = {
             'id': nid, 'deleted': False,
             'x': x, 'y': y, 'z': z,
             'rotX': rotX, 'rotY': rotY, 'rotZ': rotZ,
             'flipSwitchStand': flip,
+            'isDiamond': bool(is_diamond),
         }
         # Update raw
         if 'tracks' not in self._raw: self._raw['tracks'] = {}
         if 'nodes' not in self._raw['tracks']: self._raw['tracks']['nodes'] = {}
-        self._raw['tracks']['nodes'][nid] = {
+        raw_node = (
+            _copy.deepcopy(existing_raw)
+            if isinstance(existing_raw, dict) else {}
+        )
+        raw_node.update({
             'position': {'x': x, 'y': y, 'z': z},
             'rotation': {'x': rotX, 'y': rotY, 'z': rotZ},
             'flipSwitchStand': flip,
-        }
+            'isDiamond': bool(is_diamond),
+        })
+        raw_node.pop('IsDiamond', None)
+        self._raw['tracks']['nodes'][nid] = raw_node
         self._remove_fuse_track_removal('nodes', nid)
         self.dirty = True
 
@@ -388,7 +683,9 @@ class Layer:
     def set_segment(self, sid: str, start_id: str, end_id: str,
                     track_class: str = 'Mainline', style: str = 'Standard',
                     speed_limit: Optional[int] = 0, priority: int = 0,
-                    group_id: str = '', gauge: Optional[str] = None):
+                    group_id: str = '', gauge: Optional[str] = None,
+                    bridge_supports_steel: Optional[bool] = None,
+                    yard: Optional[bool] = None):
         if self.read_only:
             return
         if (
@@ -439,12 +736,26 @@ class Layer:
             if gauge is None and isinstance(existing_raw, dict):
                 gauge = existing_raw.get('gauge', existing_raw.get('Gauge'))
         gauge = normalize_track_gauge(gauge)
+        if bridge_supports_steel is None:
+            bridge_supports_steel = bool(existing_segment.get(
+                'bridgeSupportsSteel', False
+            ))
+            if isinstance(existing_raw, dict):
+                bridge_supports_steel = bool(existing_raw.get(
+                    'bridgeSupportsSteel', bridge_supports_steel
+                ))
+        if yard is None:
+            yard = bool(existing_segment.get('yard', False))
+            if isinstance(existing_raw, dict):
+                yard = bool(existing_raw.get('yard', yard))
         self.segments[sid] = {
             'id': sid, 'deleted': False,
             'startId': start_id, 'endId': end_id,
             'trackClass': track_class, 'style': style_norm,
             'speedLimit': speed_limit, 'priority': priority,
             'groupId': group_id, 'gauge': gauge,
+            'bridgeSupportsSteel': bool(bridge_supports_steel),
+            'yard': bool(yard),
         }
         if 'tracks' not in self._raw: self._raw['tracks'] = {}
         if 'segments' not in self._raw['tracks']: self._raw['tracks']['segments'] = {}
@@ -471,6 +782,8 @@ class Layer:
                 'priority': priority,
                 'groupId': group_id,
                 'gauge': gauge,
+                'bridgeSupportsSteel': bool(bridge_supports_steel),
+                'yard': bool(yard),
             })
             for legacy_key in (
                     'startId', 'endId', 'StartId', 'EndId', 'Style'):
@@ -542,8 +855,8 @@ class Layer:
             if not isinstance(seg, dict):
                 continue
             if self.track_schema == 'fuse':
-                if 'groupId' not in seg or seg['groupId'] is None:
-                    seg['groupId'] = ''
+                if not str(seg.get('groupId') or '').strip():
+                    seg.pop('groupId', None)
                 if 'gauge' in seg:
                     seg['gauge'] = normalize_track_gauge(seg['gauge'])
                 continue

@@ -78,6 +78,13 @@ settings for angle and length.
 For a full switch with proper geometry, use **Geo → Turnout**: select the node,
 Preview, then Commit.
 
+If the nodes and segments exist but part of a switch has no visible rail, the
+branch is usually too tight for Railroader's turnout mesh builder. The Turnout
+and Piece tools show an estimated radius and a red warning below 35 m. Increase
+the curved lead length, reduce the divergence angle, or move the diverging node
+farther from the switch. The warning is advisory because custom track renderers
+can have different limits.
+
 ## Group Operations
 
 | Action | Result |
@@ -88,8 +95,8 @@ Preview, then Commit.
 
 ## Spliney Control Points
 
-Rivers, roads, and trestles are splines with control points — the yellow dots.
-Zoom in to click one.
+Rivers, roads, trestles, and native FUSE object lines are splines with control
+points — the colored dots. Zoom in to click one.
 
 | Control | What it does |
 | --- | --- |
@@ -105,6 +112,27 @@ Zoom in to click one.
 
 River preview arrows show flow from the first point to the last, so check them
 after a Reverse Flow.
+
+### Fence / Wall Object Lines
+
+In a native FUSE project, open **F9 → Geo → Spliney → Fence / Wall**. Choose a
+loaded scenery asset identifier (recommended) or an advanced safe scene prefab
+path, then click points just like a road. FUSE places rigid copies at uniform
+spacing along the polyline. Use:
+
+- **Spacing** for the module interval;
+- **Scale** and **Model rotation offset** to match the model's authored axes;
+- **Side/height offset** to move every module away from the centerline;
+- **Snap each module to terrain** for ground contact;
+- **Follow vertical slope** when posts/panels should pitch with the grade;
+- **Always place a final module** to close the endpoint gap; and
+- **Safety limit** to prevent an accidental tiny spacing from spawning
+  thousands of objects.
+
+This is intended for rigid fence panels, posts, retaining-wall blocks,
+guardrails, pipes, and similar repeating assets. It does not deform or stretch
+the source mesh. The object line is native FUSE only; its button is visibly
+disabled in legacy RailLoader projects because that schema has no equivalent.
 
 ## Gauge
 

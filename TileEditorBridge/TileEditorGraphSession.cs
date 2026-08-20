@@ -22,6 +22,9 @@ namespace Hrogers.TileEditorBridge
             internal Vector3 Rotation;
             internal bool FlipSwitchStand;
             internal int ConnectedSegments;
+            internal string[] ConnectedSegmentIds = Array.Empty<string>();
+            internal string StartNodeId = string.Empty;
+            internal string EndNodeId = string.Empty;
             internal float Length;
             internal string GroupId = string.Empty;
             internal string Gauge = "Standard";
@@ -91,6 +94,10 @@ namespace Hrogers.TileEditorBridge
             internal Dictionary<string, MandelaModel> AfterMandelas;
             internal JObject BeforeDocument;
             internal JObject AfterDocument;
+            internal JObject BeforeToolshedFacilities;
+            internal JObject AfterToolshedFacilities;
+            internal bool BeforeToolshedFacilitiesDirty;
+            internal bool AfterToolshedFacilitiesDirty;
             internal string BeforeSelectedNode;
             internal string BeforeSelectedSegment;
             internal string BeforeSelectedScenery;
@@ -114,6 +121,7 @@ namespace Hrogers.TileEditorBridge
         private string _graphPath = string.Empty;
         private string _backupPath = string.Empty;
         private bool _fuseNativeDocument;
+        internal bool FuseNativeDocument => _fuseNativeDocument;
         private readonly HashSet<string> _documentNodeIdsAtOpen =
             new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private readonly HashSet<string> _documentSegmentIdsAtOpen =
@@ -143,6 +151,7 @@ namespace Hrogers.TileEditorBridge
                     StringComparer.OrdinalIgnoreCase);
         private GameObject _segmentOverlayRoot;
         private bool _trackOverlayVisibility;
+        private bool _segmentGradeLabelsVisible;
         private float _nextTrackOverlayCullAt;
         private Vector3 _lastTrackOverlayCameraPosition;
         private float _lastTrackOverlayRange;
@@ -184,7 +193,8 @@ namespace Hrogers.TileEditorBridge
             Dirty
             || SplineyDirty
             || TelegraphPoleDirty
-            || TerrainDirty;
+            || TerrainDirty
+            || ToolshedFacilitiesDirty;
         internal string WorldNodeShortcutStatus =>
             _worldNodeShortcutStatus;
         internal string NewNodeIdPrefix => _newNodeIdPrefix;
@@ -238,6 +248,15 @@ namespace Hrogers.TileEditorBridge
         internal string GraphName => string.IsNullOrWhiteSpace(_graphPath)
             ? "No edit layer"
             : Path.GetFileName(_graphPath);
+        internal bool SegmentGradeLabelsVisible =>
+            _segmentGradeLabelsVisible;
+
+        internal void SetSegmentGradeLabelsVisible(bool visible)
+        {
+            _segmentGradeLabelsVisible = visible;
+            foreach (var overlay in _segmentOverlays.Values)
+                overlay?.RefreshGradeLabel();
+        }
 
         internal IReadOnlyList<GraphChoice> GraphChoices
         {
@@ -254,6 +273,225 @@ namespace Hrogers.TileEditorBridge
             DiscoverGraphChoices();
         }
 
+        internal string CreateNewMapMod(
+            string modId,
+            string displayName,
+            string author,
+            bool nativeFuse,
+            bool completeMap = false,
+            double mapOriginLatitude = 35.382614,
+            double mapOriginLongitude = -83.49541)
+        {
+            if (HasUnsavedContent)
+            {
+                throw new InvalidOperationException(
+                    "Save or undo current in-game changes before creating a mod.");
+            }
+
+            modId = (modId ?? string.Empty).Trim();
+            displayName = (displayName ?? string.Empty).Trim();
+            author = (author ?? string.Empty).Trim();
+            if (!IsPortableModId(modId))
+            {
+                throw new InvalidOperationException(
+                    "Mod ID must use only letters, numbers, underscores, and dots.");
+            }
+            if (string.Equals(modId, "railloader", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(modId, "railroader", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(modId, "FUSE", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException(
+                    "That mod ID is reserved. Choose a unique author-prefixed ID.");
+            }
+            if (string.IsNullOrWhiteSpace(displayName))
+                throw new InvalidOperationException("Enter a display name.");
+            if (completeMap && !nativeFuse)
+            {
+                throw new InvalidOperationException(
+                    "Complete standalone maps require the Native FUSE package format.");
+            }
+            if (completeMap
+                && (double.IsNaN(mapOriginLatitude)
+                    || double.IsInfinity(mapOriginLatitude)
+                    || mapOriginLatitude < -90d
+                    || mapOriginLatitude > 90d))
+            {
+                throw new InvalidOperationException(
+                    "Map origin latitude must be a number between -90 and 90.");
+            }
+            if (completeMap
+                && (double.IsNaN(mapOriginLongitude)
+                    || double.IsInfinity(mapOriginLongitude)
+                    || mapOriginLongitude < -180d
+                    || mapOriginLongitude > 180d))
+            {
+                throw new InvalidOperationException(
+                    "Map origin longitude must be a number between -180 and 180.");
+            }
+
+            var modsFolder = Path.Combine(_gameRoot, "Mods");
+            Directory.CreateDirectory(modsFolder);
+            var modFolder = Path.Combine(modsFolder, modId);
+            if (Directory.Exists(modFolder)
+                && Directory.EnumerateFileSystemEntries(modFolder).Any())
+            {
+                throw new InvalidOperationException(
+                    "The mod folder already exists and is not empty: " + modFolder);
+            }
+            Directory.CreateDirectory(modFolder);
+
+            string graphPath;
+            if (nativeFuse)
+            {
+                graphPath = Path.Combine(modFolder, "map.fuse.json");
+                var info = new JObject
+                {
+                    ["$schema"] = "../FUSE/schemas/umm-info.schema.json",
+                    ["Id"] = modId,
+                    ["DisplayName"] = displayName,
+                    ["Author"] = author,
+                    ["Version"] = "0.1.0",
+                    ["ManagerVersion"] = "0.27.10",
+                    ["GameVersion"] = "2025.1",
+                    ["Requirements"] = new JArray
+                    {
+                        new JObject
+                        {
+                            ["Id"] = "FUSE",
+                            ["NotBefore"] = "1.0.0",
+                        },
+                    },
+                    ["LoadAfter"] = new JArray("FUSE"),
+                    ["FuseLoadPriority"] = 100,
+                    ["FuseLoadAfter"] = new JArray(),
+                    ["FuseLoadBefore"] = new JArray(),
+                    ["FuseDataFiles"] = new JArray("map.fuse.json"),
+                };
+                var data = new JObject
+                {
+                    ["$schema"] = "../FUSE/schemas/fuse-mod.schema.json",
+                    ["schemaVersion"] = "1.0",
+                    ["id"] = modId,
+                    ["name"] = displayName,
+                    ["author"] = author,
+                    ["modVersion"] = "0.1.0",
+                    ["coordinateSpace"] = "world",
+                    ["tracks"] = new JObject
+                    {
+                        ["nodes"] = new JObject(),
+                        ["segments"] = new JObject(),
+                        ["spans"] = new JObject(),
+                        ["removals"] = new JObject
+                        {
+                            ["nodes"] = new JArray(),
+                            ["segments"] = new JArray(),
+                            ["spans"] = new JArray(),
+                        },
+                    },
+                };
+                if (completeMap)
+                {
+                    data["map"] = new JObject
+                    {
+                        ["displayName"] = displayName,
+                        ["mapFolder"] = "Map",
+                        ["suppressBaseWorld"] = true,
+                    };
+
+                    var mapFolder = Path.Combine(modFolder, "Map");
+                    Directory.CreateDirectory(mapFolder);
+                    var mapManifest = new JObject
+                    {
+                        ["origin"] = new JObject
+                        {
+                            ["latitude"] = mapOriginLatitude,
+                            ["longitude"] = mapOriginLongitude,
+                        },
+                        ["tileDimension"] = 500d,
+                        ["tiles"] = new JArray(),
+                    };
+                    File.WriteAllText(
+                        Path.Combine(mapFolder, "Map.json"),
+                        mapManifest.ToString(Formatting.Indented));
+                }
+                File.WriteAllText(
+                    Path.Combine(modFolder, "Info.json"),
+                    info.ToString(Formatting.Indented));
+                File.WriteAllText(
+                    graphPath,
+                    data.ToString(Formatting.Indented));
+            }
+            else
+            {
+                graphPath = Path.Combine(modFolder, "game-graph.json");
+                var definition = new JObject
+                {
+                    ["manifestVersion"] = 8,
+                    ["id"] = modId,
+                    ["name"] = displayName,
+                    ["version"] = "0.1.0",
+                    ["requires"] = new JArray
+                    {
+                        new JObject
+                        {
+                            ["id"] = "railloader",
+                            ["notBefore"] = "1.8.2.1",
+                        },
+                    },
+                    ["mixintos"] = new JObject
+                    {
+                        ["game-graph"] = new JArray("file(game-graph.json)"),
+                    },
+                };
+                var graph = new JObject
+                {
+                    ["tracks"] = new JObject
+                    {
+                        ["nodes"] = new JObject(),
+                        ["segments"] = new JObject(),
+                        ["spans"] = new JObject(),
+                    },
+                    ["areas"] = new JObject(),
+                    ["texts"] = new JObject(),
+                    ["scenery"] = new JObject(),
+                    ["splineys"] = new JObject(),
+                    ["simpleGraphs"] = new JObject(),
+                    ["mandelas"] = new JObject(),
+                };
+                File.WriteAllText(
+                    Path.Combine(modFolder, "Definition.json"),
+                    definition.ToString(Formatting.Indented));
+                File.WriteAllText(
+                    graphPath,
+                    graph.ToString(Formatting.Indented));
+            }
+
+            _choicesLoaded = false;
+            DiscoverGraphChoices();
+            _logger?.Log(
+                "Tile Editor created "
+                + (nativeFuse ? "native FUSE" : "compatible")
+                + (completeMap ? " standalone" : " add-on")
+                + " map package: " + modFolder);
+            return graphPath;
+        }
+
+        private static bool IsPortableModId(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return false;
+            foreach (var character in value)
+            {
+                if (!char.IsLetterOrDigit(character)
+                    && character != '_'
+                    && character != '.')
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
         internal SelectionInfo SelectedNode => _selectedNode == null
             ? null
             : new SelectionInfo
@@ -264,6 +502,11 @@ namespace Hrogers.TileEditorBridge
                 FlipSwitchStand = _selectedNode.flipSwitchStand,
                 ConnectedSegments =
                     _graph.SegmentsConnectedTo(_selectedNode).Count(),
+                ConnectedSegmentIds = _graph
+                    .SegmentsConnectedTo(_selectedNode)
+                    .Select(segment => segment.id)
+                    .OrderBy(id => id, StringComparer.OrdinalIgnoreCase)
+                    .ToArray(),
             };
 
         internal SelectionInfo SelectedSegment => _selectedSegment == null
@@ -271,6 +514,8 @@ namespace Hrogers.TileEditorBridge
             : new SelectionInfo
             {
                 Id = _selectedSegment.id,
+                StartNodeId = _selectedSegment.a?.id ?? string.Empty,
+                EndNodeId = _selectedSegment.b?.id ?? string.Empty,
                 Length = _selectedSegment.GetLength(),
                 GroupId = _selectedSegment.groupId ?? string.Empty,
                 Gauge = GetSegmentGauge(_selectedSegment.id),
@@ -407,6 +652,7 @@ namespace Hrogers.TileEditorBridge
             ResetScenerySession();
             ResetMandelaSession();
             ResetOperationsSession();
+            ResetWaterSession();
             ResetTrainSignalSession();
             ResetCtcSession();
             if (_operationsMode)
@@ -426,6 +672,20 @@ namespace Hrogers.TileEditorBridge
                 previousSegment,
                 _selectedNode,
                 _selectedSegment);
+        }
+
+        internal void SelectNodeById(string nodeId)
+        {
+            if (_graph == null || string.IsNullOrWhiteSpace(nodeId))
+                return;
+            SelectNode(_graph.GetNode(nodeId));
+        }
+
+        internal void SelectSegmentById(string segmentId)
+        {
+            if (_graph == null || string.IsNullOrWhiteSpace(segmentId))
+                return;
+            SelectSegment(_graph.GetSegment(segmentId));
         }
 
         internal void ActivateNodeFromWorld(
@@ -1369,6 +1629,12 @@ namespace Hrogers.TileEditorBridge
                 return;
             var edit = _undo.Pop();
             Restore(edit, after: false);
+            SyncWaterSurfacesAfterDocumentRestore();
+            if (edit.BeforeToolshedFacilities != null
+                || edit.AfterToolshedFacilities != null)
+            {
+                _toolshedFacilitiesDirty = true;
+            }
             _redo.Push(edit);
             _dirty = true;
         }
@@ -1379,6 +1645,12 @@ namespace Hrogers.TileEditorBridge
                 return;
             var edit = _redo.Pop();
             Restore(edit, after: true);
+            SyncWaterSurfacesAfterDocumentRestore();
+            if (edit.BeforeToolshedFacilities != null
+                || edit.AfterToolshedFacilities != null)
+            {
+                _toolshedFacilitiesDirty = true;
+            }
             _undo.Push(edit);
             _dirty = true;
         }
@@ -1413,6 +1685,7 @@ namespace Hrogers.TileEditorBridge
             {
                 File.Move(temp, _graphPath);
             }
+            SaveToolshedFacilities();
             _dirty = false;
             _logger?.Log("Tile Editor saved graph edit layer: " + _graphPath);
         }
@@ -2472,12 +2745,29 @@ namespace Hrogers.TileEditorBridge
                 _pendingFuseSegmentDefinitions.Clear();
                 throw;
             }
+            var topologyChanged = segments.Any(segmentId =>
+            {
+                edit.BeforeSegments.TryGetValue(segmentId, out var before);
+                var current = _graph.GetSegment(segmentId);
+                return before == null != (current == null)
+                       || (before != null
+                           && current != null
+                           && (!string.Equals(
+                                   before.A,
+                                   current.a?.id,
+                                   StringComparison.Ordinal)
+                               || !string.Equals(
+                                   before.B,
+                                   current.b?.id,
+                                   StringComparison.Ordinal)));
+            });
             RebuildLiveGraph(
                 nodes,
                 segments,
                 useTargetedTrackRebuild:
-                    useLightweightTrackUpdate
-                    || useTargetedTrackRebuild,
+                    (useLightweightTrackUpdate
+                     || useTargetedTrackRebuild)
+                    && !topologyChanged,
                 nodeTransformOnly: useLightweightTrackUpdate);
             edit.AfterNodes = CaptureNodes(nodes);
             edit.AfterSegments = CaptureSegments(segments);
@@ -2528,6 +2818,17 @@ namespace Hrogers.TileEditorBridge
                 : edit.BeforeDocument;
             if (document != null)
                 _document = (JObject)document.DeepClone();
+            var toolshedFacilities = after
+                ? edit.AfterToolshedFacilities
+                : edit.BeforeToolshedFacilities;
+            if (toolshedFacilities != null)
+            {
+                _toolshedFacilitiesDocument =
+                    (JObject)toolshedFacilities.DeepClone();
+                _toolshedFacilitiesDirty = after
+                    ? edit.AfterToolshedFacilitiesDirty
+                    : edit.BeforeToolshedFacilitiesDirty;
+            }
 
             if (!edit.UseLightweightTrackUpdate)
             {
@@ -2814,27 +3115,29 @@ namespace Hrogers.TileEditorBridge
             if (!useTargetedTrackRebuild)
                 _graph.RebuildCollections();
             var trackManager = TrackObjectManager.Instance;
+            var segmentsToRefresh = new HashSet<string>(
+                segmentIds,
+                StringComparer.OrdinalIgnoreCase);
+            foreach (var nodeId in nodeIds)
+            {
+                var node = _graph.GetNode(nodeId);
+                if (node == null)
+                    continue;
+                foreach (var segment in _graph.SegmentsConnectedTo(node))
+                    segmentsToRefresh.Add(segment.id);
+            }
+            foreach (var segmentId in segmentsToRefresh)
+                _graph.GetSegment(segmentId)?.InvalidateCurve();
             if (trackManager != null)
             {
                 if (useTargetedTrackRebuild)
                 {
-                    var rebuildNodeIds = new HashSet<string>(
-                        nodeIds,
-                        StringComparer.OrdinalIgnoreCase);
-                    if (!nodeTransformOnly)
+                    foreach (var node in TrackRebuildNeighborhood(
+                                 nodeIds,
+                                 nodeTransformOnly
+                                     ? Array.Empty<string>()
+                                     : segmentIds))
                     {
-                        foreach (var segmentId in segmentIds)
-                        {
-                            var segment = _graph.GetSegment(segmentId);
-                            if (segment?.a != null)
-                                rebuildNodeIds.Add(segment.a.id);
-                            if (segment?.b != null)
-                                rebuildNodeIds.Add(segment.b.id);
-                        }
-                    }
-                    foreach (var nodeId in rebuildNodeIds)
-                    {
-                        var node = _graph.GetNode(nodeId);
                         if (node != null
                             && node.gameObject.activeInHierarchy)
                         {
@@ -2867,16 +3170,6 @@ namespace Hrogers.TileEditorBridge
 
             if (!rebuildAllOverlays)
             {
-                var segmentsToRefresh = new HashSet<string>(
-                    segmentIds);
-                foreach (var nodeId in nodeIds)
-                {
-                    var node = _graph.GetNode(nodeId);
-                    if (node == null)
-                        continue;
-                    foreach (var segment in _graph.SegmentsConnectedTo(node))
-                        segmentsToRefresh.Add(segment.id);
-                }
                 foreach (var segmentId in segmentsToRefresh)
                 {
                     var segment = _graph.GetSegment(segmentId);
@@ -2913,6 +3206,51 @@ namespace Hrogers.TileEditorBridge
                 rebuildAllOverlays);
             if (_trainSignalMode)
                 RefreshLockedTrainSignalOverlayTransforms();
+        }
+
+        private IEnumerable<TrackNode> TrackRebuildNeighborhood(
+            IEnumerable<string> nodeIds,
+            IEnumerable<string> segmentIds)
+        {
+            var nodes = new HashSet<TrackNode>();
+            foreach (var nodeId in nodeIds ?? Array.Empty<string>())
+            {
+                var node = _graph.GetNode(nodeId);
+                if (node != null)
+                    nodes.Add(node);
+            }
+            foreach (var segmentId in segmentIds ?? Array.Empty<string>())
+            {
+                var segment = _graph.GetSegment(segmentId);
+                if (segment?.a != null)
+                    nodes.Add(segment.a);
+                if (segment?.b != null)
+                    nodes.Add(segment.b);
+            }
+
+            foreach (var node in nodes.ToArray())
+            {
+                foreach (var segment in _graph.SegmentsConnectedTo(node))
+                {
+                    if (segment.a != null)
+                        nodes.Add(segment.a);
+                    if (segment.b != null)
+                        nodes.Add(segment.b);
+                }
+            }
+            foreach (var switchNode in nodes
+                         .Where(node => _graph.IsSwitch(node))
+                         .ToArray())
+            {
+                foreach (var segment in _graph.SegmentsConnectedTo(switchNode))
+                {
+                    if (segment.a != null)
+                        nodes.Add(segment.a);
+                    if (segment.b != null)
+                        nodes.Add(segment.b);
+                }
+            }
+            return nodes;
         }
 
         private void RebuildOverlays(bool rebuildExisting)
@@ -3375,16 +3713,15 @@ namespace Hrogers.TileEditorBridge
                 try
                 {
                     var definition = JObject.Parse(File.ReadAllText(definitionPath));
-                    var mixintos = definition["mixintos"]?["game-graph"] as JArray;
+                    var mixintos = definition["mixintos"]?["game-graph"];
                     if (mixintos == null)
                         continue;
                     var modName = (string)definition["name"]
                                   ?? (string)definition["id"]
                                   ?? Path.GetFileName(folder);
                     var modChoices = new List<GraphChoice>();
-                    foreach (var token in mixintos)
+                    foreach (var reference in EnumerateMixintoReferences(mixintos))
                     {
-                        var reference = (string)token;
                         var relative = ParseFileMixinto(reference);
                         if (string.IsNullOrWhiteSpace(relative))
                             continue;
@@ -3436,16 +3773,15 @@ namespace Hrogers.TileEditorBridge
                 try
                 {
                     var info = JObject.Parse(File.ReadAllText(infoPath));
-                    var dataFiles = info["FuseDataFiles"] as JArray;
+                    var dataFiles = info["FuseDataFiles"];
                     if (dataFiles == null)
                         continue;
                     var modName = (string)info["DisplayName"]
                                   ?? (string)info["Id"]
                                   ?? Path.GetFileName(folder);
                     var modChoices = new List<GraphChoice>();
-                    foreach (var token in dataFiles)
+                    foreach (var relative in EnumerateStringValues(dataFiles))
                     {
-                        var relative = (string)token;
                         if (string.IsNullOrWhiteSpace(relative))
                             continue;
                         var graphPath = Path.GetFullPath(
@@ -3508,6 +3844,48 @@ namespace Hrogers.TileEditorBridge
             });
         }
 
+        private static IEnumerable<string> EnumerateMixintoReferences(
+            JToken token)
+        {
+            foreach (var item in EnumerateTokens(token))
+            {
+                if (item.Type == JTokenType.String)
+                {
+                    yield return item.Value<string>();
+                    continue;
+                }
+                if (item is JObject conditional)
+                {
+                    var reference = (string)conditional["mixinto"]
+                                    ?? (string)conditional["value"]
+                                    ?? (string)conditional["file"];
+                    if (!string.IsNullOrWhiteSpace(reference))
+                        yield return reference;
+                }
+            }
+        }
+
+        private static IEnumerable<string> EnumerateStringValues(JToken token)
+        {
+            foreach (var item in EnumerateTokens(token))
+            {
+                if (item.Type == JTokenType.String)
+                    yield return item.Value<string>();
+            }
+        }
+
+        private static IEnumerable<JToken> EnumerateTokens(JToken token)
+        {
+            if (token is JArray array)
+            {
+                foreach (var item in array)
+                    yield return item;
+                yield break;
+            }
+            if (token != null)
+                yield return token;
+        }
+
         private static int GraphLayerPriority(GraphChoice choice)
         {
             var name = choice?.LayerName ?? string.Empty;
@@ -3564,12 +3942,14 @@ namespace Hrogers.TileEditorBridge
 
         private void WriteNode(TrackNode node)
         {
-            NodesObject[node.id] = new JObject
-            {
-                ["position"] = Vector(node.transform.localPosition),
-                ["rotation"] = Vector(node.transform.localEulerAngles),
-                ["flipSwitchStand"] = node.flipSwitchStand,
-            };
+            var existing = NodesObject[node.id] as JObject;
+            var entry = existing == null
+                ? new JObject()
+                : (JObject)existing.DeepClone();
+            entry["position"] = Vector(node.transform.localPosition);
+            entry["rotation"] = Vector(node.transform.localEulerAngles);
+            entry["flipSwitchStand"] = node.flipSwitchStand;
+            NodesObject[node.id] = entry;
             RemoveFuseTrackRemoval("nodes", node.id);
         }
 
@@ -3603,7 +3983,17 @@ namespace Hrogers.TileEditorBridge
             }
             entry["priority"] = segment.priority;
             entry["speedLimit"] = segment.speedLimit;
-            entry["groupId"] = segment.groupId ?? string.Empty;
+            if (_fuseNativeDocument)
+            {
+                if (string.IsNullOrWhiteSpace(segment.groupId))
+                    entry.Remove("groupId");
+                else
+                    entry["groupId"] = segment.groupId;
+            }
+            else
+            {
+                entry["groupId"] = segment.groupId ?? string.Empty;
+            }
             var gauge = GetSegmentGauge(segment.id);
             entry["gauge"] = gauge;
             SegmentsObject[segment.id] = entry;

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Text;
 using Helpers;
 using Map.Runtime;
 using Newtonsoft.Json.Linq;
@@ -77,9 +78,9 @@ namespace Hrogers.TileEditorBridge
         }
 
         internal int MandelaOverrideCount =>
-            _document?["mandelas"] is JObject mandelas
-                ? mandelas.Properties().Count()
-                : 0;
+            _document == null
+                ? 0
+                : MandelasObject.Properties().Count();
 
         internal IReadOnlyList<string> SearchMandelaOverrides(
             string query,
@@ -89,17 +90,22 @@ namespace Hrogers.TileEditorBridge
         {
             query = (query ?? string.Empty).Trim();
             var matches = MandelasObject.Properties()
-                .Where(property =>
+                .Select(property => new
+                {
+                    TargetPath = ReadMandelaTargetPath(property),
+                    SourcePath = ReadMandelaSourcePath(property.Value as JObject),
+                })
+                .Where(item =>
                     query.Length == 0
-                    || property.Name.IndexOf(
+                    || item.TargetPath.IndexOf(
                         query,
                         StringComparison.OrdinalIgnoreCase) >= 0
-                    || (property.Value["instantiateFrom"]?
-                            .Value<string>() ?? string.Empty)
-                        .IndexOf(
-                            query,
-                            StringComparison.OrdinalIgnoreCase) >= 0)
-                .Select(property => property.Name)
+                    || item.SourcePath.IndexOf(
+                        query,
+                        StringComparison.OrdinalIgnoreCase) >= 0)
+                .Select(item => item.TargetPath)
+                .Where(path => !string.IsNullOrWhiteSpace(path))
+                .Distinct(StringComparer.Ordinal)
                 .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
                 .ToArray();
             totalMatches = matches.Length;
@@ -387,7 +393,7 @@ namespace Hrogers.TileEditorBridge
             var selected = RequireMandela();
             var targetPath = _selectedMandelaPath;
             var sourcePath = ReadMandelaSourcePath(targetPath);
-            if (MandelasObject.Property(targetPath) == null)
+            if (FindMandelaProperty(targetPath) == null)
             {
                 throw new InvalidOperationException(
                     "The selected base object has no saved override yet.");
@@ -397,7 +403,7 @@ namespace Hrogers.TileEditorBridge
                 new[] { targetPath },
                 () =>
                 {
-                    MandelasObject.Property(targetPath)?.Remove();
+                    FindMandelaProperty(targetPath)?.Remove();
                     if (!string.IsNullOrWhiteSpace(sourcePath)
                         || selected.GetComponent<
                             TileEditorOwnedMandela>() != null)
@@ -530,7 +536,7 @@ namespace Hrogers.TileEditorBridge
                     if (target.GetComponent<
                             TileEditorOwnedMandela>() != null
                         && !target.activeSelf
-                        && MandelasObject.Property(path) == null)
+                        && FindMandelaProperty(path) == null)
                     {
                         return null;
                     }
@@ -588,12 +594,10 @@ namespace Hrogers.TileEditorBridge
         private GameObject MaterializeMandelaFromDocument(
             string targetPath)
         {
-            var entry = MandelasObject[targetPath] as JObject;
+            var entry = FindMandelaProperty(targetPath)?.Value as JObject;
             if (entry == null)
                 return null;
-            var sourcePath =
-                entry["instantiateFrom"]?.Value<string>()
-                ?? string.Empty;
+            var sourcePath = ReadMandelaSourcePath(entry);
             var target = FindSceneObjectByPath(targetPath);
             if (target == null
                 && !string.IsNullOrWhiteSpace(sourcePath))
@@ -680,14 +684,29 @@ namespace Hrogers.TileEditorBridge
             string targetPath,
             string sourcePath)
         {
-            var existing = MandelasObject[targetPath] as JObject;
+            var existingProperty = FindMandelaProperty(targetPath);
+            var existing = existingProperty?.Value as JObject;
             var entry = existing == null
                 ? new JObject()
                 : (JObject)existing.DeepClone();
-            if (string.IsNullOrWhiteSpace(sourcePath))
-                entry.Property("instantiateFrom")?.Remove();
+            if (_fuseNativeDocument)
+            {
+                entry.Remove("instantiateFrom");
+                entry["targetPath"] = targetPath;
+                if (string.IsNullOrWhiteSpace(sourcePath))
+                    entry.Remove("source");
+                else
+                    entry["source"] = NativeMandelaSource(sourcePath);
+            }
             else
-                entry["instantiateFrom"] = sourcePath;
+            {
+                entry.Remove("targetPath");
+                entry.Remove("source");
+                if (string.IsNullOrWhiteSpace(sourcePath))
+                    entry.Remove("instantiateFrom");
+                else
+                    entry["instantiateFrom"] = sourcePath;
+            }
             entry["localPosition"] =
                 Vector(target.transform.localPosition);
             entry["localRotation"] =
@@ -695,20 +714,69 @@ namespace Hrogers.TileEditorBridge
             entry["localScale"] =
                 Vector(target.transform.localScale);
             entry["enabled"] = target.activeSelf;
-            MandelasObject[targetPath] = entry;
+            if (existingProperty != null)
+                existingProperty.Value = entry;
+            else
+                MandelasObject[_fuseNativeDocument
+                    ? MandelaDefinitionId(targetPath)
+                    : targetPath] = entry;
         }
 
         private JObject MandelasObject
         {
             get
             {
-                var mandelas = _document?["mandelas"] as JObject;
-                if (mandelas == null)
+                if (_document == null)
+                    throw new InvalidOperationException(
+                        "Open an editor project first.");
+                if (!_fuseNativeDocument)
                 {
-                    mandelas = new JObject();
-                    _document["mandelas"] = mandelas;
+                    if (!(_document["mandelas"] is JObject legacyMandelas))
+                    {
+                        legacyMandelas = new JObject();
+                        _document["mandelas"] = legacyMandelas;
+                    }
+                    return legacyMandelas;
                 }
-                return mandelas;
+
+                if (!(_document["world"] is JObject world))
+                {
+                    world = new JObject();
+                    _document["world"] = world;
+                }
+                if (!(world["sceneClones"] is JObject sceneClones))
+                {
+                    sceneClones = new JObject();
+                    world["sceneClones"] = sceneClones;
+                }
+
+                if (_document["mandelas"] is JObject misplacedMandelas)
+                {
+                    foreach (var property in misplacedMandelas
+                                 .Properties()
+                                 .ToArray())
+                    {
+                        var targetPath =
+                            ((string)property.Value?["targetPath"]
+                             ?? property.Name).Trim();
+                        if (string.IsNullOrWhiteSpace(targetPath))
+                            continue;
+                        var entry = ConvertMandelaEntryToNative(
+                            targetPath,
+                            property.Value as JObject);
+                        var id = MandelaDefinitionId(targetPath);
+                        if (sceneClones[id] != null
+                            && !JToken.DeepEquals(sceneClones[id], entry))
+                        {
+                            id = NextMigratedMandelaId(sceneClones, id);
+                        }
+                        if (sceneClones[id] == null)
+                            sceneClones[id] = entry;
+                    }
+                    _document.Remove("mandelas");
+                    _dirty = true;
+                }
+                return sceneClones;
             }
         }
 
@@ -719,10 +787,106 @@ namespace Hrogers.TileEditorBridge
             {
                 return string.Empty;
             }
-            return (_document["mandelas"]?[targetPath]
-                        ?["instantiateFrom"]?.Value<string>()
-                    ?? string.Empty)
-                .Trim();
+            return ReadMandelaSourcePath(
+                FindMandelaProperty(targetPath)?.Value as JObject);
+        }
+
+        private JProperty FindMandelaProperty(string targetPath)
+        {
+            if (string.IsNullOrWhiteSpace(targetPath)
+                || _document == null)
+            {
+                return null;
+            }
+            if (!_fuseNativeDocument)
+                return MandelasObject.Property(targetPath);
+            return MandelasObject.Properties().FirstOrDefault(
+                property => string.Equals(
+                    ReadMandelaTargetPath(property),
+                    targetPath,
+                    StringComparison.Ordinal));
+        }
+
+        private string ReadMandelaTargetPath(JProperty property)
+        {
+            if (property == null)
+                return string.Empty;
+            if (!_fuseNativeDocument)
+                return property.Name;
+            return ((string)property.Value?["targetPath"]
+                    ?? string.Empty).Trim();
+        }
+
+        private static string ReadMandelaSourcePath(JObject entry)
+        {
+            var source = ((string)entry?["source"]
+                          ?? (string)entry?["instantiateFrom"]
+                          ?? string.Empty).Trim();
+            const string scenePrefix = "path://scene/";
+            return source.StartsWith(
+                scenePrefix,
+                StringComparison.OrdinalIgnoreCase)
+                ? source.Substring(scenePrefix.Length)
+                : source;
+        }
+
+        private static string NativeMandelaSource(string sourcePath)
+        {
+            var source = (sourcePath ?? string.Empty).Trim();
+            return source.IndexOf(
+                "://",
+                StringComparison.Ordinal) >= 0
+                ? source
+                : "path://scene/" + source;
+        }
+
+        private static JObject ConvertMandelaEntryToNative(
+            string targetPath,
+            JObject legacyEntry)
+        {
+            var entry = new JObject
+            {
+                ["targetPath"] = targetPath,
+            };
+            var sourcePath = ReadMandelaSourcePath(legacyEntry);
+            if (!string.IsNullOrWhiteSpace(sourcePath))
+                entry["source"] = NativeMandelaSource(sourcePath);
+            CopyMandelaProperty(legacyEntry, entry, "localPosition");
+            CopyMandelaProperty(legacyEntry, entry, "localRotation");
+            CopyMandelaProperty(legacyEntry, entry, "localScale");
+            CopyMandelaProperty(legacyEntry, entry, "enabled");
+            return entry;
+        }
+
+        private static void CopyMandelaProperty(
+            JObject source,
+            JObject target,
+            string propertyName)
+        {
+            if (source?[propertyName] != null)
+                target[propertyName] = source[propertyName].DeepClone();
+        }
+
+        private static string MandelaDefinitionId(string targetPath)
+        {
+            var bytes = Encoding.UTF8.GetBytes(
+                (targetPath ?? string.Empty).Trim());
+            return "scene-" + Convert.ToBase64String(bytes)
+                .TrimEnd('=')
+                .Replace('+', '-')
+                .Replace('/', '_');
+        }
+
+        private static string NextMigratedMandelaId(
+            JObject sceneClones,
+            string baseId)
+        {
+            var prefix = baseId + ".migrated";
+            var candidate = prefix;
+            var sequence = 2;
+            while (sceneClones[candidate] != null)
+                candidate = prefix + sequence++;
+            return candidate;
         }
 
         private GameObject ResolveSelectedMandela()
@@ -796,6 +960,8 @@ namespace Hrogers.TileEditorBridge
                 var hit = _mandelaRaycastHits[index];
                 if (hit.collider == null
                     || hit.distance >= nearestDistance
+                    || IsGeneratedTrackGeometry(
+                        hit.collider.transform)
                     || !IsMandelaSelectable(hit.collider.transform)
                     || IsUnsafeMandelaSelection(
                         hit.collider.transform,
@@ -817,6 +983,8 @@ namespace Hrogers.TileEditorBridge
                     || !renderer.enabled
                     || !renderer.gameObject.activeInHierarchy
                     || !renderer.gameObject.scene.IsValid()
+                    || IsGeneratedTrackGeometry(
+                        renderer.transform)
                     || !IsMandelaSelectable(renderer.transform)
                     || !renderer.bounds.IntersectRay(
                         ray,
@@ -858,6 +1026,8 @@ namespace Hrogers.TileEditorBridge
                     || !renderer.enabled
                     || !renderer.gameObject.activeInHierarchy
                     || !renderer.gameObject.scene.IsValid()
+                    || IsGeneratedTrackGeometry(
+                        renderer.transform)
                     || !IsMandelaSelectable(renderer.transform)
                     || IsUnsafeMandelaSelection(
                         renderer.transform,
@@ -1004,6 +1174,33 @@ namespace Hrogers.TileEditorBridge
                 return false;
             }
             return true;
+        }
+
+        private static bool IsGeneratedTrackGeometry(Transform target)
+        {
+            for (var current = target;
+                 current != null;
+                 current = current.parent)
+            {
+                try
+                {
+                    if (current.CompareTag("TrackMeshGenerated"))
+                        return true;
+                }
+                catch (UnityException)
+                {
+                    // A third-party object can expose an invalid serialized
+                    // tag. Component checks below still keep ordinary track
+                    // graph objects out of the object workspace.
+                }
+
+                if (current.GetComponent<TrackNode>() != null
+                    || current.GetComponent<TrackSegment>() != null)
+                {
+                    return true;
+                }
+            }
+            return false;
         }
 
         private static Transform PromoteMandelaSelection(

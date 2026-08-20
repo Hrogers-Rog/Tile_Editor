@@ -1,9 +1,11 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Linq;
 using Core;
 using Helpers;
+using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using UnityEngine;
 
@@ -81,6 +83,9 @@ namespace Hrogers.TileEditorBridge
             internal int BasePopulation = 5;
             internal string Branch = "Main";
             internal string NeighborIds = string.Empty;
+            internal float TraverseTimeToNext;
+            internal string PassengerMapFeature = string.Empty;
+            internal string PassengerIntermediates = string.Empty;
             internal string OutputSpanIds = string.Empty;
             internal string ConvertedLoadId = string.Empty;
             internal float? CostPerUnit;
@@ -90,6 +95,20 @@ namespace Hrogers.TileEditorBridge
             internal string BookReasons = string.Empty;
             internal string Title = string.Empty;
             internal string CustomFieldsJson = string.Empty;
+        }
+
+        internal sealed class ToolshedServiceAssetInfo
+        {
+            internal string DisplayName = string.Empty;
+            internal string ModelIdentifier = string.Empty;
+            internal string LoadPointId = string.Empty;
+            internal string ServiceLoadId = string.Empty;
+
+            internal string DisplayLabel =>
+                DisplayName
+                + (string.IsNullOrWhiteSpace(ServiceLoadId)
+                    ? string.Empty
+                    : "  [" + ServiceLoadId + "]");
         }
 
         private readonly List<OperationInfo> _operations =
@@ -108,14 +127,30 @@ namespace Hrogers.TileEditorBridge
         private int _cachedOperationTotal;
         private IReadOnlyList<OperationInfo> _cachedOperationResults =
             Array.Empty<OperationInfo>();
+        private string _toolshedFacilitiesPath = string.Empty;
+        private string _toolshedFacilitiesBackupPath = string.Empty;
+        private JObject _toolshedFacilitiesDocument;
+        private bool _toolshedFacilitiesDirty;
+        private bool _toolshedFacilitiesExistedAtLoad;
+        private IReadOnlyList<ToolshedServiceAssetInfo>
+            _toolshedServiceAssets =
+                Array.Empty<ToolshedServiceAssetInfo>();
 
         internal IReadOnlyList<OperationInfo> Operations => _operations;
         internal bool FuseOperationsDocument => _fuseNativeDocument;
+        internal bool ToolshedFacilitiesDirty =>
+            _toolshedFacilitiesDirty;
+        internal string ToolshedFacilitiesPath =>
+            _toolshedFacilitiesPath;
+        internal IReadOnlyList<ToolshedServiceAssetInfo>
+            ToolshedServiceAssets => _toolshedServiceAssets;
         internal OperationInfo SelectedOperation =>
             _operations.FirstOrDefault(item => string.Equals(
                 item.Key,
                 _selectedOperationKey,
                 StringComparison.OrdinalIgnoreCase));
+        internal bool CanMoveSelectedOperation =>
+            IsMovableOperation(SelectedOperation);
 
         internal void SetOperationsMode(bool active)
         {
@@ -220,6 +255,45 @@ namespace Hrogers.TileEditorBridge
             CameraSelector.shared.ZoomToPoint(selected.Position);
         }
 
+        internal string MoveSelectedOperationTo(Vector3 position)
+        {
+            RequireSession();
+            ValidateOperationPosition(position);
+            var selected = SelectedOperation;
+            if (!IsMovableOperation(selected))
+            {
+                throw new InvalidOperationException(
+                    "Select a town, industry, physical loader, station agent, "
+                    + "or turntable before moving it.");
+            }
+
+            ExecuteOperationsEdit(
+                "Move operations entry",
+                () =>
+                {
+                    var entry = FindPositionedOperationObject(selected);
+                    if (selected.Kind == OperationKind.Industry
+                        && !_fuseNativeDocument)
+                    {
+                        var area = (_document["areas"] as JObject)?[
+                            selected.OwnerId] as JObject;
+                        if (area == null)
+                        {
+                            throw new InvalidOperationException(
+                                "The legacy industry owner town '"
+                                + selected.OwnerId + "' is not in this layer.");
+                        }
+                        entry["localPosition"] = Vector(
+                            position - ReadOperationVector(area["position"]));
+                    }
+                    else
+                    {
+                        entry["position"] = Vector(position);
+                    }
+                });
+            return "Moved " + selected.DisplayLabel;
+        }
+
         internal string CreateTown(
             string id,
             string name,
@@ -257,7 +331,6 @@ namespace Hrogers.TileEditorBridge
                     if (_fuseNativeDocument)
                     {
                         entry["spanIds"] = new JArray();
-                        entry["groupId"] = string.Empty;
                     }
                     else
                     {
@@ -466,6 +539,50 @@ namespace Hrogers.TileEditorBridge
             return "Created industry " + id;
         }
 
+        internal string RemoveBaseIndustry(string industryId)
+        {
+            RequireSession();
+            if (!_fuseNativeDocument)
+            {
+                throw new InvalidOperationException(
+                    "Base-game industry removal is native FUSE only. "
+                    + "Open or create a native FUSE map package.");
+            }
+
+            industryId = NormalizeOperationId(
+                industryId,
+                "base-game industry");
+            ExecuteOperationsEdit(
+                "Remove base-game industry",
+                () =>
+                {
+                    var operations = EnsureOperationObject(
+                        _document,
+                        "operations");
+                    var removals = EnsureOperationObject(
+                        operations,
+                        "removals");
+                    var industries = removals["industries"] as JArray;
+                    if (industries == null)
+                    {
+                        industries = new JArray();
+                        removals["industries"] = industries;
+                    }
+                    if (industries.Values<string>().Any(value =>
+                            string.Equals(
+                                value,
+                                industryId,
+                                StringComparison.OrdinalIgnoreCase)))
+                    {
+                        throw new InvalidOperationException(
+                            "Industry " + industryId
+                            + " is already in this package's removal list.");
+                    }
+                    industries.Add(industryId);
+                });
+            return "Added base-game industry removal " + industryId;
+        }
+
         internal string AddIndustryComponent(
             string industryId,
             string componentId,
@@ -571,6 +688,17 @@ namespace Hrogers.TileEditorBridge
                         entry["neighborIds"] = new JArray(
                             ParseOperationIdList(
                                 options.NeighborIds));
+                        var branchDefinition =
+                            BuildPassengerBranchDefinition(
+                                options,
+                                _fuseNativeDocument);
+                        if (branchDefinition != null)
+                        {
+                            entry[_fuseNativeDocument
+                                ? "branchDefinitions"
+                                : "branches"] = new JArray(
+                                    branchDefinition);
+                        }
                         if (string.IsNullOrWhiteSpace(loadId))
                             entry["loadId"] = "passengers";
                         if (string.IsNullOrWhiteSpace(carTypeFilter))
@@ -682,6 +810,8 @@ namespace Hrogers.TileEditorBridge
             RequireSession();
             id = NormalizeOperationId(id, "loader");
             prefab = RequireOperationText(prefab, "loader prefab");
+            if (_fuseNativeDocument)
+                prefab = RequireFuseUri(prefab, "loader prefab");
             industryId = (industryId ?? string.Empty).Trim();
             ValidateOperationPosition(position);
             ExecuteOperationsEdit(
@@ -700,14 +830,16 @@ namespace Hrogers.TileEditorBridge
                             loaders,
                             id,
                             "physical loader");
-                        loaders[id] = new JObject
+                        var entry = new JObject
                         {
                             ["position"] = Vector(position),
                             ["rotation"] = Vector(
                                 new Vector3(0f, yaw, 0f)),
                             ["prefab"] = prefab,
-                            ["industryId"] = industryId,
                         };
+                        if (!string.IsNullOrWhiteSpace(industryId))
+                            entry["industryId"] = industryId;
+                        loaders[id] = entry;
                     }
                     else
                     {
@@ -734,6 +866,531 @@ namespace Hrogers.TileEditorBridge
                         id);
                 });
             return "Created physical loader " + id;
+        }
+
+        internal string CreatePhysicalLoaderSnapped(
+            string id,
+            string prefab,
+            string industryId,
+            Vector3 position,
+            float yaw,
+            bool snapToTrack,
+            string preferredSegmentId,
+            float sideOffset,
+            float alongOffset,
+            float verticalOffset,
+            float headingOffset,
+            bool rightSide)
+        {
+            if (!snapToTrack)
+            {
+                return CreatePhysicalLoader(
+                    id,
+                    prefab,
+                    industryId,
+                    position,
+                    yaw);
+            }
+            ValidateLoaderSnapOffsets(
+                sideOffset,
+                alongOffset,
+                verticalOffset,
+                headingOffset);
+            var segment = FindSignalAttachmentSegment(
+                preferredSegmentId,
+                position,
+                50f);
+            var parameter = ClosestCurveParameter(
+                segment.Curve,
+                position);
+            parameter = Mathf.Clamp01(
+                parameter
+                + alongOffset / Mathf.Max(0.01f, segment.GetLength()));
+            var frame = SignalTrackFrame(segment, parameter);
+            var side = rightSide ? 1f : -1f;
+            var snappedPosition = segment.Curve.GetPoint(parameter)
+                                  + frame * Vector3.right
+                                  * (Mathf.Abs(sideOffset) * side)
+                                  + Vector3.up * verticalOffset;
+            var result = CreatePhysicalLoader(
+                id,
+                prefab,
+                industryId,
+                snappedPosition,
+                frame.eulerAngles.y + headingOffset);
+            return result + " snapped to " + segment.id;
+        }
+
+        internal string CreateToolshedServiceFacilitySnapped(
+            string facilityId,
+            string sceneryId,
+            string modelIdentifier,
+            string loadPointId,
+            string serviceLoadId,
+            string sourceIndustryId,
+            string serviceTrackSpanIds,
+            bool requireAuthoredLoadPoints,
+            Vector3 position,
+            float yaw,
+            bool snapToTrack,
+            string preferredSegmentId,
+            float sideOffset,
+            float alongOffset,
+            float verticalOffset,
+            float headingOffset,
+            bool rightSide)
+        {
+            if (!snapToTrack)
+            {
+                return CreateToolshedServiceFacility(
+                    facilityId,
+                    sceneryId,
+                    modelIdentifier,
+                    loadPointId,
+                    serviceLoadId,
+                    sourceIndustryId,
+                    serviceTrackSpanIds,
+                    requireAuthoredLoadPoints,
+                    position,
+                    yaw);
+            }
+            ValidateLoaderSnapOffsets(
+                sideOffset,
+                alongOffset,
+                verticalOffset,
+                headingOffset);
+            var segment = FindSignalAttachmentSegment(
+                preferredSegmentId,
+                position,
+                50f);
+            var parameter = ClosestCurveParameter(
+                segment.Curve,
+                position);
+            parameter = Mathf.Clamp01(
+                parameter
+                + alongOffset / Mathf.Max(0.01f, segment.GetLength()));
+            var frame = SignalTrackFrame(segment, parameter);
+            var side = rightSide ? 1f : -1f;
+            var snappedPosition = segment.Curve.GetPoint(parameter)
+                                  + frame * Vector3.right
+                                  * (Mathf.Abs(sideOffset) * side)
+                                  + Vector3.up * verticalOffset;
+            var result = CreateToolshedServiceFacility(
+                facilityId,
+                sceneryId,
+                modelIdentifier,
+                loadPointId,
+                serviceLoadId,
+                sourceIndustryId,
+                serviceTrackSpanIds,
+                requireAuthoredLoadPoints,
+                snappedPosition,
+                frame.eulerAngles.y + headingOffset);
+            return result + " snapped to " + segment.id;
+        }
+
+        internal string CreateToolshedServiceFacility(
+            string facilityId,
+            string sceneryId,
+            string modelIdentifier,
+            string loadPointId,
+            string serviceLoadId,
+            string sourceIndustryId,
+            string serviceTrackSpanIds,
+            bool requireAuthoredLoadPoints,
+            Vector3 position,
+            float yaw)
+        {
+            RequireSession();
+            if (!_fuseNativeDocument)
+            {
+                throw new InvalidOperationException(
+                    "Toolshed custom service assets require FUSE-native "
+                    + "output. Switch the project format to FUSE Native.");
+            }
+            facilityId = NormalizeOperationId(
+                facilityId,
+                "Toolshed facility");
+            sceneryId = NormalizeOperationId(
+                sceneryId,
+                "scenery object");
+            modelIdentifier = RequireOperationText(
+                modelIdentifier,
+                "custom loader model identifier");
+            loadPointId = (loadPointId ?? string.Empty).Trim();
+            serviceLoadId = (serviceLoadId ?? string.Empty).Trim();
+            sourceIndustryId = (sourceIndustryId ?? string.Empty).Trim();
+            var spanIds = ParseOperationIdList(
+                serviceTrackSpanIds);
+            if (string.IsNullOrWhiteSpace(serviceLoadId)
+                && string.IsNullOrWhiteSpace(sourceIndustryId))
+            {
+                throw new InvalidOperationException(
+                    "Enter a service load ID for an infinite facility, or "
+                    + "bind a source industry that lets Toolshed infer it.");
+            }
+            ValidateOperationPosition(position);
+            EnsureToolshedFacilitiesLoaded();
+            ExecuteOperationsEdit(
+                "Create Toolshed custom service facility",
+                () =>
+                {
+                    var scenery = EnsureSceneryObjectForDocument(
+                        _document,
+                        true,
+                        out _);
+                    RequireUnusedOperationId(
+                        scenery,
+                        sceneryId,
+                        "scenery object");
+                    var sceneryEntry = new JObject
+                    {
+                        ["position"] = Vector(position),
+                        ["rotation"] = Vector(
+                            new Vector3(0f, yaw, 0f)),
+                        ["scale"] = Vector(Vector3.one),
+                    };
+                    WriteSceneryAssetIdentifier(
+                        sceneryEntry,
+                        modelIdentifier,
+                        true);
+                    scenery[sceneryId] = sceneryEntry;
+                    _selectedScenery = ApplySceneryModel(
+                        new SceneryModel
+                        {
+                            Id = sceneryId,
+                            ModelIdentifier =
+                                ToolshedModelIdentifier(
+                                    modelIdentifier),
+                            Position = position,
+                            Rotation = new Vector3(0f, yaw, 0f),
+                            Scale = Vector3.one,
+                        });
+                    _selectedSceneryId = sceneryId;
+
+                    var facilities = RequireToolshedFacilitiesArray();
+                    if (facilities.OfType<JObject>().Any(item =>
+                            string.Equals(
+                                (string)item["id"],
+                                facilityId,
+                                StringComparison.OrdinalIgnoreCase)))
+                    {
+                        throw new InvalidOperationException(
+                            "Toolshed facility ID '" + facilityId
+                            + "' already exists in "
+                            + _toolshedFacilitiesPath + ".");
+                    }
+                    var binding = new JObject
+                    {
+                        ["id"] = facilityId,
+                        ["targetObjectName"] = sceneryId,
+                        ["modelIdentifier"] =
+                            ToolshedModelIdentifier(modelIdentifier),
+                        ["requireAuthoredLoadPoints"] =
+                            requireAuthoredLoadPoints,
+                        ["debugLogging"] = false,
+                    };
+                    AddOptionalString(
+                        binding,
+                        "loadPointId",
+                        loadPointId);
+                    AddOptionalString(
+                        binding,
+                        "serviceLoadId",
+                        serviceLoadId);
+                    AddOptionalString(
+                        binding,
+                        "sourceIndustryId",
+                        sourceIndustryId);
+                    if (spanIds.Length == 1)
+                    {
+                        binding["serviceTrackSpanId"] = spanIds[0];
+                    }
+                    else if (spanIds.Length > 1)
+                    {
+                        binding["serviceTrackSpanIds"] =
+                            new JArray(spanIds);
+                    }
+                    facilities.Add(binding);
+                    _toolshedFacilitiesDirty = true;
+                },
+                new[] { sceneryId });
+            return "Created Toolshed service facility " + facilityId
+                   + " and FUSE scenery " + sceneryId;
+        }
+
+        internal string RefreshToolshedServiceAssets()
+        {
+            var assets = new Dictionary<string, ToolshedServiceAssetInfo>(
+                StringComparer.OrdinalIgnoreCase);
+            var modsDirectory = Path.Combine(_gameRoot, "Mods");
+            if (Directory.Exists(modsDirectory))
+            {
+                IEnumerable<string> definitionFiles;
+                try
+                {
+                    definitionFiles = Directory.EnumerateFiles(
+                        modsDirectory,
+                        "Definitions.json",
+                        SearchOption.AllDirectories).ToArray();
+                }
+                catch (Exception ex)
+                {
+                    throw new InvalidOperationException(
+                        "Could not scan installed asset definitions: "
+                        + ex.Message,
+                        ex);
+                }
+                foreach (var path in definitionFiles)
+                {
+                    try
+                    {
+                        DiscoverToolshedServiceAssets(path, assets);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger?.Warning(
+                            "Tile Editor skipped malformed asset catalog '"
+                            + path + "': " + ex.Message);
+                    }
+                }
+            }
+            _toolshedServiceAssets = assets.Values
+                .OrderBy(item => item.DisplayName,
+                    StringComparer.OrdinalIgnoreCase)
+                .ThenBy(item => item.ModelIdentifier,
+                    StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            return "Found " + _toolshedServiceAssets.Count
+                   + " installed Toolshed service asset(s).";
+        }
+
+        private static void DiscoverToolshedServiceAssets(
+            string path,
+            IDictionary<string, ToolshedServiceAssetInfo> assets)
+        {
+            var root = JObject.Parse(File.ReadAllText(path));
+            var objects = root["objects"] as JArray;
+            if (objects == null)
+                return;
+            foreach (var item in objects.OfType<JObject>())
+            {
+                var definition = item["definition"] as JObject;
+                var components = definition?["components"] as JArray;
+                if (definition == null || components == null)
+                    continue;
+                var modelIdentifier =
+                    ((string)item["identifier"]
+                     ?? (string)definition["modelIdentifier"]
+                     ?? string.Empty).Trim();
+                if (modelIdentifier.Length == 0)
+                    continue;
+                var displayName =
+                    ((string)item["metadata"]?["name"]
+                     ?? modelIdentifier).Trim();
+                foreach (var component in components.OfType<JObject>())
+                {
+                    if (!string.Equals(
+                            (string)component["kind"],
+                            "ToolshedServiceLoadPoint",
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+                    var loadPointId =
+                        ((string)component["loadPointId"]
+                         ?? string.Empty).Trim();
+                    var serviceLoadId =
+                        ((string)component["serviceLoadId"]
+                         ?? string.Empty).Trim();
+                    var key = modelIdentifier + "\n" + loadPointId
+                              + "\n" + serviceLoadId;
+                    if (!assets.ContainsKey(key))
+                    {
+                        assets[key] = new ToolshedServiceAssetInfo
+                        {
+                            DisplayName = displayName,
+                            ModelIdentifier = modelIdentifier,
+                            LoadPointId = loadPointId,
+                            ServiceLoadId = serviceLoadId,
+                        };
+                    }
+                }
+            }
+        }
+
+        private void EnsureToolshedFacilitiesLoaded()
+        {
+            if (_toolshedFacilitiesDocument != null)
+                return;
+            var modDirectory = FindOwningModDirectory();
+            if (string.IsNullOrWhiteSpace(modDirectory))
+            {
+                throw new InvalidOperationException(
+                    "The open graph is not inside a recognized mod folder. "
+                    + "Open a native FUSE package with Info.json before "
+                    + "authoring a Toolshed facility.");
+            }
+            _toolshedFacilitiesPath = Path.Combine(
+                modDirectory,
+                "ToolshedServiceFacilities.json");
+            _toolshedFacilitiesExistedAtLoad =
+                File.Exists(_toolshedFacilitiesPath);
+            _toolshedFacilitiesDocument =
+                _toolshedFacilitiesExistedAtLoad
+                    ? JObject.Parse(
+                        File.ReadAllText(_toolshedFacilitiesPath))
+                    : new JObject
+                    {
+                        ["facilities"] = new JArray(),
+                    };
+            RequireToolshedFacilitiesArray();
+        }
+
+        private JArray RequireToolshedFacilitiesArray()
+        {
+            if (_toolshedFacilitiesDocument == null)
+                throw new InvalidOperationException(
+                    "Toolshed facilities are not loaded.");
+            if (!(_toolshedFacilitiesDocument["facilities"]
+                  is JArray facilities))
+            {
+                throw new InvalidOperationException(
+                    "ToolshedServiceFacilities.json must contain a "
+                    + "'facilities' array.");
+            }
+            return facilities;
+        }
+
+        private void SaveToolshedFacilities()
+        {
+            if (!_toolshedFacilitiesDirty
+                || _toolshedFacilitiesDocument == null)
+            {
+                return;
+            }
+            var facilities = RequireToolshedFacilitiesArray();
+            if (!_toolshedFacilitiesExistedAtLoad
+                && facilities.Count == 0)
+            {
+                _toolshedFacilitiesDirty = false;
+                return;
+            }
+            var directory = Path.GetDirectoryName(
+                _toolshedFacilitiesPath);
+            if (string.IsNullOrWhiteSpace(directory))
+            {
+                throw new InvalidOperationException(
+                    "Toolshed facility output path is invalid.");
+            }
+            Directory.CreateDirectory(directory);
+            if (string.IsNullOrWhiteSpace(
+                    _toolshedFacilitiesBackupPath)
+                && File.Exists(_toolshedFacilitiesPath))
+            {
+                _toolshedFacilitiesBackupPath =
+                    _toolshedFacilitiesPath
+                    + ".tile-editor-backup-"
+                    + DateTime.Now.ToString(
+                        "yyyyMMdd-HHmmss",
+                        CultureInfo.InvariantCulture);
+                File.Copy(
+                    _toolshedFacilitiesPath,
+                    _toolshedFacilitiesBackupPath,
+                    false);
+                TileEditorBackupRetention.PruneFor(
+                    _toolshedFacilitiesPath);
+            }
+            var temporary = _toolshedFacilitiesPath
+                            + ".tile-editor.tmp";
+            File.WriteAllText(
+                temporary,
+                _toolshedFacilitiesDocument.ToString(
+                    Formatting.Indented));
+            if (File.Exists(_toolshedFacilitiesPath))
+            {
+                try
+                {
+                    File.Replace(
+                        temporary,
+                        _toolshedFacilitiesPath,
+                        null);
+                }
+                catch
+                {
+                    File.Delete(_toolshedFacilitiesPath);
+                    File.Move(
+                        temporary,
+                        _toolshedFacilitiesPath);
+                }
+            }
+            else
+            {
+                File.Move(temporary, _toolshedFacilitiesPath);
+            }
+            _toolshedFacilitiesExistedAtLoad = true;
+            _toolshedFacilitiesDirty = false;
+            _logger?.Log(
+                "Tile Editor saved Toolshed service bindings: "
+                + _toolshedFacilitiesPath);
+        }
+
+        private static void AddOptionalString(
+            JObject target,
+            string name,
+            string value)
+        {
+            if (!string.IsNullOrWhiteSpace(value))
+                target[name] = value.Trim();
+        }
+
+        private static string ToolshedModelIdentifier(
+            string identifier)
+        {
+            identifier = (identifier ?? string.Empty).Trim();
+            var separator = identifier.IndexOf(
+                "://",
+                StringComparison.Ordinal);
+            return separator < 0
+                ? identifier
+                : identifier.Substring(separator + 3);
+        }
+
+        private static void ValidateLoaderSnapOffsets(
+            float sideOffset,
+            float alongOffset,
+            float verticalOffset,
+            float headingOffset)
+        {
+            if (float.IsNaN(sideOffset)
+                || float.IsInfinity(sideOffset)
+                || sideOffset < 0f
+                || sideOffset > 50f)
+            {
+                throw new InvalidOperationException(
+                    "Loader distance from track must be between 0 and 50 m.");
+            }
+            if (float.IsNaN(alongOffset)
+                || float.IsInfinity(alongOffset)
+                || Mathf.Abs(alongOffset) > 500f)
+            {
+                throw new InvalidOperationException(
+                    "Loader distance along track must be between -500 and 500 m.");
+            }
+            if (float.IsNaN(verticalOffset)
+                || float.IsInfinity(verticalOffset)
+                || Mathf.Abs(verticalOffset) > 25f)
+            {
+                throw new InvalidOperationException(
+                    "Loader vertical offset must be between -25 and 25 m.");
+            }
+            if (float.IsNaN(headingOffset)
+                || float.IsInfinity(headingOffset)
+                || Mathf.Abs(headingOffset) > 360f)
+            {
+                throw new InvalidOperationException(
+                    "Loader heading adjustment must be between -360 and 360 degrees.");
+            }
         }
 
         internal string AddEngineFacilityProfile(
@@ -834,6 +1491,9 @@ namespace Hrogers.TileEditorBridge
             }
             id = NormalizeOperationId(id, "station agent");
             prefab = RequireOperationText(
+                prefab,
+                "station-agent prefab");
+            prefab = RequireFuseUri(
                 prefab,
                 "station-agent prefab");
             passengerStopId = NormalizeOperationId(
@@ -995,24 +1655,43 @@ namespace Hrogers.TileEditorBridge
             return "Removed " + selected.DisplayLabel;
         }
 
-        private void ExecuteOperationsEdit(string name, Action mutation)
+        private void ExecuteOperationsEdit(
+            string name,
+            Action mutation,
+            IEnumerable<string> sceneryIds = null)
         {
             RequireSession();
             RequireGraphEditOwnership();
+            var affectedSceneryIds = (sceneryIds
+                                       ?? Array.Empty<string>())
+                .Where(id => !string.IsNullOrWhiteSpace(id))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
             var beforeDocument = (JObject)_document.DeepClone();
             var beforeOperationKey = _selectedOperationKey;
+            var beforeToolshedFacilities =
+                _toolshedFacilitiesDocument == null
+                    ? null
+                    : (JObject)_toolshedFacilitiesDocument.DeepClone();
+            var beforeToolshedFacilitiesDirty =
+                _toolshedFacilitiesDirty;
             var edit = new EditRecord
             {
                 Name = name,
                 NodeIds = Array.Empty<string>(),
                 SegmentIds = Array.Empty<string>(),
-                SceneryIds = Array.Empty<string>(),
+                SceneryIds = affectedSceneryIds,
                 MandelaIds = Array.Empty<string>(),
                 BeforeNodes = new Dictionary<string, NodeModel>(),
                 BeforeSegments = new Dictionary<string, SegmentModel>(),
-                BeforeScenery = new Dictionary<string, SceneryModel>(),
+                BeforeScenery = CaptureScenery(
+                    affectedSceneryIds),
                 BeforeMandelas = new Dictionary<string, MandelaModel>(),
                 BeforeDocument = beforeDocument,
+                BeforeToolshedFacilities =
+                    beforeToolshedFacilities,
+                BeforeToolshedFacilitiesDirty =
+                    beforeToolshedFacilitiesDirty,
                 BeforeSelectedNode = _selectedNode?.id,
                 BeforeSelectedSegment = _selectedSegment?.id,
                 BeforeSelectedScenery = _selectedSceneryId,
@@ -1029,15 +1708,36 @@ namespace Hrogers.TileEditorBridge
                 // unsuccessful click never leaves a partial facility behind.
                 _document = (JObject)beforeDocument.DeepClone();
                 _selectedOperationKey = beforeOperationKey;
+                if (beforeToolshedFacilities != null)
+                {
+                    _toolshedFacilitiesDocument =
+                        (JObject)beforeToolshedFacilities.DeepClone();
+                }
+                _toolshedFacilitiesDirty =
+                    beforeToolshedFacilitiesDirty;
+                RestoreSceneryModels(edit, false);
                 if (_operationsMode)
                     RefreshOperationsMode(true);
                 throw;
             }
             edit.AfterNodes = new Dictionary<string, NodeModel>();
             edit.AfterSegments = new Dictionary<string, SegmentModel>();
-            edit.AfterScenery = new Dictionary<string, SceneryModel>();
+            if (affectedSceneryIds.Length > 0)
+            {
+                RebuildSceneryOverlays(false);
+                SetSceneryOverlaysVisible(
+                    _editModeActive && _sceneryMode);
+            }
+            edit.AfterScenery = CaptureScenery(
+                affectedSceneryIds);
             edit.AfterMandelas = new Dictionary<string, MandelaModel>();
             edit.AfterDocument = (JObject)_document.DeepClone();
+            edit.AfterToolshedFacilities =
+                _toolshedFacilitiesDocument == null
+                    ? null
+                    : (JObject)_toolshedFacilitiesDocument.DeepClone();
+            edit.AfterToolshedFacilitiesDirty =
+                _toolshedFacilitiesDirty;
             edit.AfterSelectedNode = _selectedNode?.id;
             edit.AfterSelectedSegment = _selectedSegment?.id;
             edit.AfterSelectedScenery = _selectedSceneryId;
@@ -1067,6 +1767,13 @@ namespace Hrogers.TileEditorBridge
         {
             _operations.Clear();
             _selectedOperationKey = string.Empty;
+            _toolshedFacilitiesPath = string.Empty;
+            _toolshedFacilitiesBackupPath = string.Empty;
+            _toolshedFacilitiesDocument = null;
+            _toolshedFacilitiesDirty = false;
+            _toolshedFacilitiesExistedAtLoad = false;
+            _toolshedServiceAssets =
+                Array.Empty<ToolshedServiceAssetInfo>();
             InvalidateOperationSearch();
             DisposeOperationOverlays();
         }
@@ -1077,6 +1784,13 @@ namespace Hrogers.TileEditorBridge
             DisposeOperationOverlays();
             _operations.Clear();
             _selectedOperationKey = string.Empty;
+            _toolshedFacilitiesPath = string.Empty;
+            _toolshedFacilitiesBackupPath = string.Empty;
+            _toolshedFacilitiesDocument = null;
+            _toolshedFacilitiesDirty = false;
+            _toolshedFacilitiesExistedAtLoad = false;
+            _toolshedServiceAssets =
+                Array.Empty<ToolshedServiceAssetInfo>();
             InvalidateOperationSearch();
         }
 
@@ -1988,11 +2702,16 @@ namespace Hrogers.TileEditorBridge
             if (string.Equals(
                     profile,
                     "Passenger",
-                    StringComparison.OrdinalIgnoreCase)
-                && options.BasePopulation < 0)
+                    StringComparison.OrdinalIgnoreCase))
             {
-                throw new InvalidOperationException(
-                    "Passenger population cannot be negative.");
+                if (options.BasePopulation < 0)
+                {
+                    throw new InvalidOperationException(
+                        "Passenger population cannot be negative.");
+                }
+                ValidateFiniteNonNegative(
+                    options.TraverseTimeToNext,
+                    "Passenger time to next stop");
             }
             ValidateOptionalHour(
                 options.NotBeforeHour,
@@ -2181,6 +2900,98 @@ namespace Hrogers.TileEditorBridge
                     ["loadingTimeDays"] = days,
                     ["carTypeFilter"] = carFilter,
                 };
+            }
+            return result;
+        }
+
+        private static JObject BuildPassengerBranchDefinition(
+            IndustryComponentOptions options,
+            bool fuseNative)
+        {
+            var mapFeature =
+                (options.PassengerMapFeature ?? string.Empty).Trim();
+            var intermediates = ParsePassengerIntermediates(
+                options.PassengerIntermediates,
+                fuseNative);
+            if (options.TraverseTimeToNext <= 0f
+                && mapFeature.Length == 0
+                && !intermediates.Properties().Any())
+            {
+                return null;
+            }
+
+            var branch = new JObject
+            {
+                ["branch"] = string.IsNullOrWhiteSpace(options.Branch)
+                    ? "Main"
+                    : options.Branch.Trim(),
+                ["traverseTimeToNext"] = options.TraverseTimeToNext,
+            };
+            if (mapFeature.Length > 0)
+                branch["mapFeature"] = mapFeature;
+            if (intermediates.Properties().Any())
+            {
+                branch[fuseNative ? "intermediates" : "Intermediates"] =
+                    intermediates;
+            }
+            return branch;
+        }
+
+        private static JObject ParsePassengerIntermediates(
+            string text,
+            bool fuseNative)
+        {
+            var result = new JObject();
+            foreach (var line in (text ?? string.Empty)
+                         .Replace("\r", string.Empty)
+                         .Split(
+                             new[] { '\n' },
+                             StringSplitOptions.RemoveEmptyEntries))
+            {
+                var parts = line.Split('|');
+                if (parts.Length != 3)
+                {
+                    throw new InvalidOperationException(
+                        "Each passenger intermediate must use "
+                        + "id|code|minutes.");
+                }
+                var id = parts[0].Trim();
+                var code = parts[1].Trim();
+                var minutesText = parts[2].Trim();
+                if (id.Length == 0
+                    || code.Length == 0
+                    || !float.TryParse(
+                        minutesText,
+                        NumberStyles.Float,
+                        CultureInfo.InvariantCulture,
+                        out var minutes)
+                    || minutes < 0f
+                    || float.IsNaN(minutes)
+                    || float.IsInfinity(minutes))
+                {
+                    throw new InvalidOperationException(
+                        "Invalid passenger intermediate: " + line);
+                }
+                if (result.Property(
+                        id,
+                        StringComparison.OrdinalIgnoreCase) != null)
+                {
+                    throw new InvalidOperationException(
+                        "Passenger intermediate ID " + id
+                        + " is listed more than once.");
+                }
+                result[id] = fuseNative
+                    ? new JObject
+                    {
+                        ["code"] = code,
+                        ["traverseTimeToNext"] = minutes,
+                    }
+                    : new JObject
+                    {
+                        ["name"] = id,
+                        ["Code"] = code,
+                        ["traverseTimeToNext"] = minutes,
+                    };
             }
             return result;
         }
@@ -2386,6 +3197,46 @@ namespace Hrogers.TileEditorBridge
             return value;
         }
 
+        private static string RequireFuseUri(
+            string value,
+            string label)
+        {
+            value = RequireOperationText(value, label);
+            var separator = value.IndexOf(
+                "://",
+                StringComparison.Ordinal);
+            if (separator <= 0)
+            {
+                throw new InvalidOperationException(
+                    "The " + label + " must be a FUSE URI such as "
+                    + "vanilla://waterTower, scenery://asset-id, "
+                    + "path://scene/object, or empty://stationAgent.");
+            }
+            var scheme = value.Substring(0, separator);
+            var allowed = new[]
+            {
+                "vanilla",
+                "path",
+                "scenery",
+                "asset",
+                "rail",
+                "file",
+                "empty",
+                "fuse",
+            };
+            if (!allowed.Any(candidate => string.Equals(
+                    candidate,
+                    scheme,
+                    StringComparison.OrdinalIgnoreCase)))
+            {
+                throw new InvalidOperationException(
+                    "The " + label + " uses unsupported URI scheme '"
+                    + scheme + "'.");
+            }
+            return scheme.ToLowerInvariant()
+                   + value.Substring(separator);
+        }
+
         private static void ValidateOperationPosition(Vector3 position)
         {
             if (float.IsNaN(position.x)
@@ -2478,6 +3329,78 @@ namespace Hrogers.TileEditorBridge
             string id)
         {
             return kind + ":" + (id ?? string.Empty);
+        }
+
+        private static bool IsMovableOperation(OperationInfo selected)
+        {
+            if (selected == null)
+                return false;
+            switch (selected.Kind)
+            {
+                case OperationKind.Town:
+                case OperationKind.Industry:
+                case OperationKind.PhysicalLoader:
+                case OperationKind.StationAgent:
+                case OperationKind.Turntable:
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        private JObject FindPositionedOperationObject(OperationInfo selected)
+        {
+            JObject entry = null;
+            if (_fuseNativeDocument)
+            {
+                switch (selected.Kind)
+                {
+                    case OperationKind.Town:
+                        entry = (_document["tracks"]?["areas"] as JObject)?[
+                            selected.Id] as JObject;
+                        break;
+                    case OperationKind.Industry:
+                        entry = (_document["operations"]?["industries"] as JObject)?[
+                            selected.Id] as JObject;
+                        break;
+                    case OperationKind.PhysicalLoader:
+                        entry = (_document["operations"]?["loaders"] as JObject)?[
+                            selected.Id] as JObject;
+                        break;
+                    case OperationKind.StationAgent:
+                        entry = (_document["operations"]?["stations"] as JObject)?[
+                            selected.Id] as JObject;
+                        break;
+                    case OperationKind.Turntable:
+                        entry = (_document["operations"]?["turntables"] as JObject)?[
+                            selected.Id] as JObject;
+                        break;
+                }
+            }
+            else if (selected.Kind == OperationKind.Town)
+            {
+                entry = (_document["areas"] as JObject)?[
+                    selected.Id] as JObject;
+            }
+            else if (selected.Kind == OperationKind.Industry)
+            {
+                entry = (_document["areas"]?[selected.OwnerId]?["industries"]
+                    as JObject)?[selected.Id] as JObject;
+            }
+            else if (selected.Kind == OperationKind.PhysicalLoader
+                     || selected.Kind == OperationKind.Turntable)
+            {
+                entry = (_document["splineys"] as JObject)?[
+                    selected.Id] as JObject;
+            }
+
+            if (entry == null)
+            {
+                throw new InvalidOperationException(
+                    "Could not find " + selected.DisplayLabel
+                    + " in the active operations layer.");
+            }
+            return entry;
         }
 
         internal static string OperationKindLabel(OperationKind kind)

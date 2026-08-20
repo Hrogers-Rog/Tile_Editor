@@ -10,10 +10,12 @@ Every panel writes to the owning mod JSON layer and triggers a bridge reload.
 
 | Control | What it does |
 | --- | --- |
-| Open Mod Folder | Load a mod folder (needs `Definition.json`) |
+| Open Mod Folder | Load a RailLoader `Definition.json` or native FUSE `Info.json` package |
 | Open Base Game | Load a standalone `graph-data.json` |
-| New Mod | Create a new mod folder structure |
+| New Mod | Create and immediately open a complete compatible or native FUSE package |
 | Save All | Save every dirty layer file |
+| Validate | Run a copyable pre-publish report for manifests, graph, native operations, and references |
+| Export ZIP | Validate and create a clean distribution archive; errors block export, warnings do not |
 | Layer dot | Toggle layer visibility |
 | Layer row | Set as the active layer |
 | ● indicator | Unsaved changes in that layer |
@@ -21,6 +23,80 @@ Every panel writes to the owning mod JSON layer and triggers a bridge reload.
 Columns show per-layer counts: Nodes (plus deleted), Segs, Spl (splineys), Areas.
 
 Closing the panel with ✕ or `Esc` leaves the mod loaded.
+
+### Validate And Export
+
+**Validate** checks the saved package rather than a hidden editor snapshot. If
+the project is dirty, the editor asks whether to save first. The report includes
+manifest/file problems, track topology, TrackSpan endpoints, native FUSE
+operations relationships, and native water-surface geometry:
+
+- industry-to-area, component-to-TrackSpan, and component-to-load references;
+- required TrackSpans/loads for known component types;
+- unique passenger stop IDs and timetable codes;
+- missing and one-way passenger-neighbor relationships;
+- station-agent-to-passenger-stop and physical-loader-to-industry references.
+- water boundary point count/coordinates, self-crossing polygons, material/source
+  fields, and safe UV/tessellation ranges.
+- native player-option settings, comparison operators, target kinds, duplicate
+  targets, and whether every target is authored in the same file.
+
+An add-on may intentionally reference the base game or a required package, so a
+reference not defined inside that package is a warning. A standalone map sets
+`suppressBaseWorld` and must be self-contained; the same missing reference is an
+error. This distinction prevents a legitimate patch/add-on from being labeled
+broken while still preventing an incomplete new map from being published.
+
+**Export ZIP** runs the same validation. Errors stop the export and open the
+copyable report. Warnings remain visible but allow a clean ZIP after the author
+confirms that its external dependencies are intentional. Development files,
+backups, caches, build output, and oversized files are omitted.
+
+### Creating A Mod From Scratch
+
+Choose **New Mod**, enter a stable ID such as `YourName.NewMap`, then select a
+package format and the parent folder. The editor creates its own named child
+folder and refuses to overwrite a folder containing files.
+
+- **Native FUSE package (recommended)** creates `Info.json` and
+  `map.fuse.json`. This is the authoritative editor format and supports native
+  endpoints, removals, station agents, turntables, and every future FUSE-only
+  feature.
+- **Legacy RailLoader package (limited)** creates `Definition.json` and
+  `game-graph.json`. RailLoader loads it directly and FUSE can import it, but the
+  editor disables native-only operations that cannot be represented honestly in
+  legacy JSON. It does not require Strange Customs or Alina's Map Mod for the
+  subset it supports.
+
+Do not hand-maintain the same objects in both files. A future legacy export is a
+lossy compatibility projection from the native document, never a second source
+of truth. If a project must still ship to RailLoader users today, author only the
+legacy-supported subset or release a separately tested legacy build.
+
+## Options Workspace (in-game)
+
+Open `F9` → **Options** in a native FUSE project to make one mod configurable
+instead of publishing a base package plus several optional add-ons.
+
+1. Choose **ON / OFF**, **CHOICE**, or **SLIDER**.
+2. Enter stable rule and setting IDs plus the label players will see.
+3. Set the default and the value/comparison that includes the feature.
+4. Cycle through target kinds and add the exact authored nodes, segments, spans,
+   scenery, industries, components, loaders, water surfaces, progression, or
+   audio objects controlled by the option.
+5. Save the player option, then save the mod.
+
+The editor writes top-level `settings` and `featureRules`, forces
+`reloadRequired: true`, validates references, and includes the edit in ordinary
+undo/redo. FUSE keeps the complete source definition and filters only its
+runtime copy, so switching the setting off does not erase authored data.
+
+Feature rules intentionally cannot target base-game or dependency objects. This
+keeps a package option from silently deleting another package's content. Use
+normal FUSE removals or a separately ordered patch for that job.
+
+The RailLoader schema has no matching object-level option feature. The same
+workspace remains visible but greyed out for a legacy project.
 
 ## Map Legend
 
@@ -119,17 +195,23 @@ Places instances of base-game prefabs.
 | Place on Map | Drop the draft at terrain height |
 | Enabled | Cycle default / enabled / disabled |
 
-FUSE imports the same entries as `world.sceneClones`, so one graph stays
-compatible with both runtimes.
+Legacy projects store these entries as root-level RailLoader `mandelas`; FUSE
+imports those for compatibility. Native projects write the stronger
+`world.sceneClones` contract directly, including a schema-safe definition ID,
+the actual Unity path in `targetPath`, and `path://scene/...` for clone sources.
 
 ## Objects Workspace (in-game)
 
 Selects base-game buildings and props under the mouse and saves move, rotate,
-scale, enable/disable, and safe-clone operations as portable RailLoader mandelas.
+scale, enable/disable, and safe-clone operations. The active project format
+decides whether they save as native FUSE scene clones or legacy RailLoader
+mandelas.
 
 Shared town, map, and world roots are blocked, so clicking one station cannot move
 the entire scene. Thin signs and small props get a screen-space picking halo when
-the ray misses.
+the ray misses. Generated track meshes are ignored by the Objects picker, so a
+town sign beside or behind the rail can be selected without the track stealing
+the click.
 
 The F9 OBJECTS page also identifies Railroader's original scene signs and gives
 them a dedicated visible/hidden toggle, without treating loader-added scenery
@@ -185,7 +267,9 @@ and deletion.
 
 New poles and edges persist in the map mod's
 `tile-editor-telegraph-poles.json`. Original poles still save compatible
-cumulative Alina `TelegraphPoleMover` offsets plus portable rotation overrides.
+cumulative offsets plus portable rotation overrides. Native FUSE projects write
+base-pole offsets to `world.telegraphPoleMovements`; RailLoader projects write
+the equivalent Alina `TelegraphPoleMover` handler.
 
 ## Related
 

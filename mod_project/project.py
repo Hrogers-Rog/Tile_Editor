@@ -4,6 +4,7 @@ ModProject — loads, merges, and saves a full mod folder or base game file.
 
 import copy as _copy
 import json
+import math
 import re
 import shutil
 from pathlib import Path
@@ -429,10 +430,6 @@ class ModProject:
             if (
                 fpath.name.lower().endswith('.fuse.json')
                 and isinstance(layer._raw.get('tracks'), dict)
-                and (
-                    (layer._raw['tracks'].get('nodes') or {})
-                    or (layer._raw['tracks'].get('segments') or {})
-                )
             ):
                 layer.layer_type = LAYER_GRAPH
                 layer.color = LAYER_COLORS[LAYER_GRAPH]
@@ -471,49 +468,150 @@ class ModProject:
 
     @classmethod
     def new_mod(cls, folder: Path, mod_id: str, mod_name: str,
-                version: str = '0.0.1',
+                version: str = '0.1.0',
                 author: str = 'Author',
-                loader: str = 'railloader',
+                loader: str = 'compatible',
                 assemblies: list = None,
                 conflicts_with: list = None,
                 load_before: list = None,
                 priority: int = 0,
                 update_url: str = None,
-                requirements: list = None) -> 'ModProject':
+                requirements: list = None,
+                complete_map: bool = False,
+                map_origin_lat: float = None,
+                map_origin_lon: float = None,
+                map_tile_dimension: float = 500.0) -> 'ModProject':
         """Create a new empty mod project.
 
         mod_id    -- must match ^[A-Za-z0-9_.]+$ (hyphens are invalid in both
                      Railloader and UMM mod IDs)
-        loader    -- 'railloader' (default) or 'umm'.
-                     'railloader'  -- writes Definition.json for map mods
-                     'umm'         -- writes Info.json (C# utility mods only)
-        author    -- mod author name (UMM only)
-        requirements -- list of required mod IDs (UMM: Requirements field)
+        loader    -- 'compatible' (default), 'fuse', or 'umm'.
+                     'compatible' / 'railloader' -- writes one legacy graph
+                       package that RailLoader loads directly and FUSE imports.
+                     'fuse' -- writes a native FUSE Info.json and data fragment.
+                     'umm' -- writes an Info.json for a C# utility mod.
+        author    -- mod author name
+        requirements -- list of required mod IDs (UMM only)
 
         Railloader-only fields (ignored when loader='umm'):
           assemblies, conflicts_with, load_before, priority, update_url
         """
         import re as _re
-        # Validate mod ID -- same regex for both loaders
+        folder = Path(folder)
+        loader_kind = str(loader or 'compatible').strip().lower()
+        if loader_kind == 'railloader':
+            loader_kind = 'compatible'
+        if loader_kind not in ('compatible', 'fuse', 'umm'):
+            raise ValueError(
+                "loader must be 'compatible', 'fuse', or 'umm'"
+            )
+
+        # Use the common RailLoader/UMM ID subset so either package type can
+        # be selected without silently creating an invalid folder.
         # Confirmed: Railloader ValidIdRegex = ^[A-Za-z0-9_.]+$
         # UMM ModInfo.Id has same constraint in practice
         _VALID_ID = _re.compile(r'^[A-Za-z0-9_.]+$')
-        if not _VALID_ID.match(mod_id):
-            print(f"[new_mod] WARNING: mod ID '{mod_id}' contains characters outside "
-                  f"[A-Za-z0-9_.] -- hyphens and special chars are not valid in mod IDs.")
+        mod_id = str(mod_id or '').strip()
+        mod_name = str(mod_name or '').strip()
+        author = str(author or '').strip()
+        if not mod_id or not _VALID_ID.fullmatch(mod_id):
+            raise ValueError(
+                "Mod ID must use only letters, numbers, underscores, and dots"
+            )
+        if mod_id.lower() in ('railloader', 'railroader', 'fuse'):
+            raise ValueError(f"Mod ID '{mod_id}' is reserved")
+        if not mod_name:
+            raise ValueError("Mod display name cannot be empty")
+        if complete_map and loader_kind != 'fuse':
+            raise ValueError("Complete standalone maps require loader='fuse'")
+        if complete_map:
+            map_origin_lat = float(map_origin_lat)
+            map_origin_lon = float(map_origin_lon)
+            map_tile_dimension = float(map_tile_dimension)
+            if not all(math.isfinite(value) for value in (
+                    map_origin_lat, map_origin_lon, map_tile_dimension)):
+                raise ValueError("Map origin and tile dimension must be finite")
+            if not -90.0 <= map_origin_lat <= 90.0:
+                raise ValueError("Map origin latitude must be between -90 and 90")
+            if not -180.0 <= map_origin_lon <= 180.0:
+                raise ValueError("Map origin longitude must be between -180 and 180")
+            if map_tile_dimension <= 0.0:
+                raise ValueError("Map tile dimension must be greater than zero")
+        if folder.exists() and any(folder.iterdir()):
+            raise FileExistsError(
+                f"Refusing to overwrite non-empty mod folder: {folder}"
+            )
 
         folder.mkdir(parents=True, exist_ok=True)
         proj = cls()
         proj.name   = mod_name
 
-        # Create empty game-graph.json -- same format regardless of loader
-        graph_path = folder / 'game-graph.json'
-        empty = {'tracks': {'nodes': {}, 'segments': {}, 'spans': {}},
-                 'areas': {}, 'texts': {},
-                 'scenery': {}, 'splineys': {}, 'simpleGraphs': {}, 'mandelas': {}}
-        _save_json(graph_path, empty)
+        if loader_kind == 'fuse':
+            # A native FUSE data package. The schema URI points to the copy
+            # supplied by the installed FUSE runtime; it is guidance for JSON
+            # editors and is not required for loading.
+            graph_path = folder / 'map.fuse.json'
+            empty = {
+                '$schema': '../FUSE/schemas/fuse-mod.schema.json',
+                'schemaVersion': '1.0',
+                'id': mod_id,
+                'name': mod_name,
+                'author': author,
+                'modVersion': version,
+                'coordinateSpace': 'world',
+                'tracks': {
+                    'nodes': {},
+                    'segments': {},
+                    'spans': {},
+                    'removals': {
+                        'nodes': [],
+                        'segments': [],
+                        'spans': [],
+                    },
+                },
+            }
+            if complete_map:
+                empty['map'] = {
+                    'displayName': mod_name,
+                    'mapFolder': 'Map',
+                    'suppressBaseWorld': True,
+                }
+                map_folder = folder / 'Map'
+                map_folder.mkdir(parents=True, exist_ok=True)
+                _save_json(map_folder / 'Map.json', {
+                    'origin': {
+                        'latitude': map_origin_lat,
+                        'longitude': map_origin_lon,
+                    },
+                    'tileDimension': map_tile_dimension,
+                    'tiles': [],
+                })
+            _save_json(graph_path, empty)
+            proj.definition = {
+                'Id': mod_id,
+                'DisplayName': mod_name,
+                'Author': author,
+                'Version': version,
+                'ManagerVersion': '0.27.10',
+                'GameVersion': '2025.1',
+                'Requirements': [
+                    {'Id': 'FUSE', 'NotBefore': '1.0.0'},
+                ],
+                'LoadAfter': ['FUSE'],
+                'FuseLoadPriority': 100,
+                'FuseLoadAfter': [],
+                'FuseLoadBefore': [],
+                'FuseDataFiles': ['map.fuse.json'],
+            }
+            _save_json(folder / 'Info.json', proj.definition)
+            definition_path = folder / 'Info.json'
 
-        if loader == 'umm':
+        elif loader_kind == 'umm':
+            graph_path = folder / 'game-graph.json'
+            empty = {'tracks': {'nodes': {}, 'segments': {}, 'spans': {}},
+                     'areas': {}, 'texts': {},
+                     'scenery': {}, 'splineys': {}, 'simpleGraphs': {}, 'mandelas': {}}
+            _save_json(graph_path, empty)
             # UMM Info.json format
             # Confirmed from UnityModManager/UnityModManager.cs ModInfo class
             proj.definition = {
@@ -531,7 +629,14 @@ class ModProject:
             definition_path = folder / 'Info.json'
 
         else:
-            # Railloader Definition.json format (legacy)
+            graph_path = folder / 'game-graph.json'
+            empty = {'tracks': {'nodes': {}, 'segments': {}, 'spans': {}},
+                     'areas': {}, 'texts': {},
+                     'scenery': {}, 'splineys': {}, 'simpleGraphs': {}, 'mandelas': {}}
+            _save_json(graph_path, empty)
+            # One-source compatible package: RailLoader loads this manifest,
+            # while FUSE imports the supported legacy graph schema. Do not add
+            # Strange Customs or Alina unless a project actually uses them.
             # D4: manifestVersion=8 = ModDefinition.CurrentManifestVersion
             proj.definition = {
                 'manifestVersion': 8,
@@ -539,9 +644,7 @@ class ModProject:
                 'name':    mod_name,
                 'version': version,
                 'requires': [
-                    {'id': 'railloader',             'notBefore': '1.8.2.1'},
-                    {'id': 'Zamu.StrangeCustoms',    'notBefore': '1.10.24366.2150'},
-                    {'id': 'AlinaNova21.AlinasMapMod', 'notBefore': '1.7.25315.2154'},
+                    {'id': 'railloader', 'notBefore': '1.8.2.1'},
                 ],
                 'mixintos': {
                     'game-graph': ['file(game-graph.json)']
@@ -563,7 +666,7 @@ class ModProject:
         source_idx = proj._add_source(folder, mod_name, proj.definition, definition_path)
 
         layer = Layer(graph_path, LAYER_GRAPH, LAYER_COLORS[LAYER_GRAPH],
-                      'game-graph.json')
+                      graph_path.name)
         layer.load()
         proj._tag_layer_source(layer, source_idx)
         proj.layers.append(layer)

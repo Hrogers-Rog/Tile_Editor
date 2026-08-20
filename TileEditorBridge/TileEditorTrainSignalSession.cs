@@ -996,6 +996,7 @@ namespace Hrogers.TileEditorBridge
         private void SaveTrainSignals()
         {
             EnsureTrainSignalsDocument();
+            EnsureSignalRuntimeRequirement();
             if (string.IsNullOrWhiteSpace(_trainSignalsBackupPath)
                 && File.Exists(_trainSignalsPath))
             {

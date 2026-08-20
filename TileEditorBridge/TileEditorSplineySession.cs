@@ -21,6 +21,7 @@ namespace Hrogers.TileEditorBridge
             Road,
             River,
             Trestle,
+            ObjectLine,
         }
 
         internal sealed class SplinePointInfo
@@ -38,6 +39,18 @@ namespace Hrogers.TileEditorBridge
             internal string HeadStyle = string.Empty;
             internal string TailStyle = string.Empty;
             internal bool IsLiveMapSource;
+            internal bool IsObjectLine;
+            internal string AssetIdentifier = string.Empty;
+            internal string Prefab = string.Empty;
+            internal float Spacing;
+            internal Vector3 InstanceScale = Vector3.one;
+            internal Vector3 RotationOffset;
+            internal float LateralOffset;
+            internal float VerticalOffset;
+            internal bool SnapToTerrain;
+            internal bool AlignToSlope;
+            internal bool PlaceAtEnd;
+            internal int MaximumInstances;
         }
 
         private sealed class SplineSource
@@ -50,6 +63,7 @@ namespace Hrogers.TileEditorBridge
             internal SplineKind Kind;
             internal RiverPath LivePath;
             internal TrestleComponent LiveTrestle;
+            internal GameObject LiveObjectLine;
             internal bool BuiltWithFuse;
             internal bool IsLiveMapSource;
         }
@@ -104,6 +118,8 @@ namespace Hrogers.TileEditorBridge
             source => source.Kind == SplineKind.River);
         internal int TrestleSplineyCount => _splineSources.Values.Count(
             source => source.Kind == SplineKind.Trestle);
+        internal int ObjectLineSplineyCount => _splineSources.Values.Count(
+            source => source.Kind == SplineKind.ObjectLine);
         internal bool SplineTrackPickMode => _splineTrackPickMode;
         internal IReadOnlyList<string> LastSavedSplinePaths =>
             _lastSavedSplinePaths;
@@ -120,6 +136,7 @@ namespace Hrogers.TileEditorBridge
                     return null;
                 }
                 var trestle = source.LiveTrestle;
+                var objectLine = source.Kind == SplineKind.ObjectLine;
                 return new SplinePointInfo
                 {
                     Id = source.Id,
@@ -131,7 +148,8 @@ namespace Hrogers.TileEditorBridge
                     Position = SplinePointPosition(source, _selectedSplinePoint),
                     Rotation = SplinePointRotation(source, _selectedSplinePoint),
                     Width = SplinePointWidth(source, _selectedSplinePoint),
-                    HasWidth = source.Kind != SplineKind.Trestle,
+                    HasWidth = source.Kind == SplineKind.Road
+                               || source.Kind == SplineKind.River,
                     HeadStyle = trestle == null
                         ? ReadEntryString(source.Entry, "headStyle", "Block")
                         : trestle.headStyle.ToString(),
@@ -139,6 +157,33 @@ namespace Hrogers.TileEditorBridge
                         ? ReadEntryString(source.Entry, "tailStyle", "Block")
                         : trestle.tailStyle.ToString(),
                     IsLiveMapSource = source.IsLiveMapSource,
+                    IsObjectLine = objectLine,
+                    AssetIdentifier = ReadEntryString(
+                        source.Entry,
+                        "assetIdentifier",
+                        string.Empty),
+                    Prefab = ReadEntryString(
+                        source.Entry,
+                        "prefab",
+                        string.Empty),
+                    Spacing = source.Entry["spacing"]?.Value<float>() ?? 5f,
+                    InstanceScale = ReadVectorOrDefault(
+                        source.Entry["instanceScale"],
+                        Vector3.one),
+                    RotationOffset = ReadVector(
+                        source.Entry["rotationOffset"]),
+                    LateralOffset =
+                        source.Entry["lateralOffset"]?.Value<float>() ?? 0f,
+                    VerticalOffset =
+                        source.Entry["verticalOffset"]?.Value<float>() ?? 0f,
+                    SnapToTerrain =
+                        source.Entry["snapToTerrain"]?.Value<bool>() ?? false,
+                    AlignToSlope =
+                        source.Entry["alignToSlope"]?.Value<bool>() ?? false,
+                    PlaceAtEnd =
+                        source.Entry["placeAtEnd"]?.Value<bool>() ?? true,
+                    MaximumInstances =
+                        source.Entry["maximumInstances"]?.Value<int>() ?? 1024,
                 };
             }
         }
@@ -287,13 +332,21 @@ namespace Hrogers.TileEditorBridge
                             appliedOffset);
                         source.LivePath.points[_selectedSplinePoint] = point;
                     }
-                    else
+                    else if (source.LiveTrestle != null)
                     {
                         var point =
                             source.LiveTrestle.controlPoints[_selectedSplinePoint];
                         point.position += SplineVectorToLocal(
                             source.LiveTrestle.transform,
                             appliedOffset);
+                    }
+                    else
+                    {
+                        var point = RequireObjectLinePoint(
+                            source,
+                            _selectedSplinePoint);
+                        point["position"] = Vector(
+                            ReadVector(point["position"]) + appliedOffset);
                     }
                 });
         }
@@ -310,12 +363,20 @@ namespace Hrogers.TileEditorBridge
                         point.eulerAngles += offset;
                         source.LivePath.points[_selectedSplinePoint] = point;
                     }
-                    else
+                    else if (source.LiveTrestle != null)
                     {
                         var point =
                             source.LiveTrestle.controlPoints[_selectedSplinePoint];
                         point.rotation =
                             point.rotation * Quaternion.Euler(offset);
+                    }
+                    else
+                    {
+                        var point = RequireObjectLinePoint(
+                            source,
+                            _selectedSplinePoint);
+                        point["rotation"] = Vector(
+                            ReadVector(point["rotation"]) + offset);
                     }
                 });
         }
@@ -323,9 +384,10 @@ namespace Hrogers.TileEditorBridge
         internal void SetSelectedSplinePointWidth(float width)
         {
             var source = RequireSplinePoint();
-            if (source.Kind == SplineKind.Trestle)
+            if (source.Kind == SplineKind.Trestle
+                || source.Kind == SplineKind.ObjectLine)
                 throw new InvalidOperationException(
-                    "Bridge and trestle points do not use width.");
+                    "Bridge, trestle, and object-line points do not use width.");
             if (width < 0.5f || width > 500f)
                 throw new InvalidOperationException(
                     "Spline width must be between 0.5 and 500 m.");
@@ -347,7 +409,8 @@ namespace Hrogers.TileEditorBridge
             ValidateVector(position, "spline point position");
             ValidateVector(rotation, "spline point rotation");
             var source = RequireSplinePoint();
-            if (source.Kind != SplineKind.Trestle
+            if ((source.Kind == SplineKind.Road
+                 || source.Kind == SplineKind.River)
                 && (width < 0.5f || width > 500f))
             {
                 throw new InvalidOperationException(
@@ -367,13 +430,21 @@ namespace Hrogers.TileEditorBridge
                         point.width = width;
                         liveSource.LivePath.points[_selectedSplinePoint] = point;
                     }
-                    else
+                    else if (liveSource.LiveTrestle != null)
                     {
                         var point = liveSource.LiveTrestle
                             .controlPoints[_selectedSplinePoint];
                         point.position = SplinePointFromGame(owner, position);
                         point.rotation = Quaternion.Euler(
                             SplineRotationFromGame(owner, rotation));
+                    }
+                    else
+                    {
+                        var point = RequireObjectLinePoint(
+                            liveSource,
+                            _selectedSplinePoint);
+                        point["position"] = Vector(position);
+                        point["rotation"] = Vector(rotation);
                     }
                 });
         }
@@ -441,7 +512,7 @@ namespace Hrogers.TileEditorBridge
                             _selectedSplinePoint + 1,
                             inserted);
                     }
-                    else
+                    else if (source.LiveTrestle != null)
                     {
                         var trestle = source.LiveTrestle;
                         var current =
@@ -477,6 +548,38 @@ namespace Hrogers.TileEditorBridge
                         trestle.controlPoints.Insert(
                             _selectedSplinePoint + 1,
                             inserted);
+                    }
+                    else
+                    {
+                        var points = RequireObjectLinePoints(source);
+                        var current = RequireObjectLinePoint(
+                            source,
+                            _selectedSplinePoint);
+                        var currentPosition = ReadVector(current["position"]);
+                        Vector3 position;
+                        Vector3 rotation;
+                        if (_selectedSplinePoint + 1 < points.Count)
+                        {
+                            var next = (JObject)points[_selectedSplinePoint + 1];
+                            position = Vector3.Lerp(
+                                currentPosition,
+                                ReadVector(next["position"]),
+                                0.5f);
+                            rotation = Quaternion.Slerp(
+                                Quaternion.Euler(ReadVector(current["rotation"])),
+                                Quaternion.Euler(ReadVector(next["rotation"])),
+                                0.5f).eulerAngles;
+                        }
+                        else
+                        {
+                            rotation = ReadVector(current["rotation"]);
+                            position = currentPosition
+                                       + Quaternion.Euler(rotation)
+                                       * Vector3.forward * 20f;
+                        }
+                        points.Insert(
+                            _selectedSplinePoint + 1,
+                            SplinePointToken(position, rotation, null));
                     }
                     _selectedSplinePoint++;
                 });
@@ -535,7 +638,7 @@ namespace Hrogers.TileEditorBridge
                             newLocalRotation,
                             previous.width));
                     }
-                    else
+                    else if (liveSource.LiveTrestle != null)
                     {
                         var trestle = liveSource.LiveTrestle;
                         var previous =
@@ -557,6 +660,16 @@ namespace Hrogers.TileEditorBridge
                                 rotation = newLocalRotation,
                             });
                     }
+                    else
+                    {
+                        var points = RequireObjectLinePoints(liveSource);
+                        var previous = (JObject)points[previousIndex];
+                        previous["rotation"] = Vector(previousRotation);
+                        points.Add(SplinePointToken(
+                            position,
+                            newRotation,
+                            null));
+                    }
                     _selectedSplinePoint = previousIndex + 1;
                 });
             return "Added point " + (_selectedSplinePoint + 1)
@@ -577,9 +690,14 @@ namespace Hrogers.TileEditorBridge
                         liveSource.LivePath.points.RemoveAt(
                             _selectedSplinePoint);
                     }
-                    else
+                    else if (liveSource.LiveTrestle != null)
                     {
                         liveSource.LiveTrestle.controlPoints.RemoveAt(
+                            _selectedSplinePoint);
+                    }
+                    else
+                    {
+                        RequireObjectLinePoints(liveSource).RemoveAt(
                             _selectedSplinePoint);
                     }
                     _selectedSplinePoint = Mathf.Clamp(
@@ -672,7 +790,6 @@ namespace Hrogers.TileEditorBridge
             var entry = new JObject();
             if (splineKind == SplineKind.Trestle)
             {
-                entry["handler"] = "StrangeCustoms.AutoTrestleBuilder";
                 entry["points"] = new JArray(
                     SplinePointToken(start, rotation, null),
                     SplinePointToken(end, rotation, null));
@@ -681,15 +798,177 @@ namespace Hrogers.TileEditorBridge
             }
             else
             {
-                entry["handler"] = "StrangeCustoms.FlowyThingBuilder";
                 entry["profile"] = profile.Trim();
                 entry["style"] = splineKind.ToString();
                 entry["points"] = new JArray(
                     SplinePointToken(start, rotation, width),
                     SplinePointToken(end, rotation, width));
             }
+            NormalizeSplineEntryForDocument(
+                entry,
+                splineKind,
+                _fuseNativeDocument);
 
             return AddNewSplineSource(id, splineKind, entry);
+        }
+
+        internal string CreateObjectLineAtCamera(
+            string requestedId,
+            string assetIdentifier,
+            string prefab,
+            float length,
+            float spacing,
+            Vector3 instanceScale,
+            Vector3 rotationOffset,
+            float lateralOffset,
+            float verticalOffset,
+            bool snapToTerrain,
+            bool alignToSlope,
+            bool placeAtEnd,
+            int maximumInstances)
+        {
+            if (CameraSelector.shared == null)
+                throw new InvalidOperationException(
+                    "Railroader's camera is not ready.");
+            if (length < 2f || length > 2000f)
+                throw new InvalidOperationException(
+                    "New object-line length must be between 2 and 2000 m.");
+            var start = WorldTransformer.WorldToGame(
+                            CameraSelector.shared.CurrentCameraGroundPosition)
+                        + Vector3.up * 0.05f;
+            var yaw = Camera.main == null
+                ? 0f
+                : Camera.main.transform.eulerAngles.y;
+            var end = start
+                      + Quaternion.Euler(0f, yaw, 0f)
+                      * Vector3.forward * length;
+            return CreateObjectLineBetweenPositions(
+                requestedId,
+                assetIdentifier,
+                prefab,
+                start,
+                end,
+                spacing,
+                instanceScale,
+                rotationOffset,
+                lateralOffset,
+                verticalOffset,
+                snapToTerrain,
+                alignToSlope,
+                placeAtEnd,
+                maximumInstances);
+        }
+
+        internal string CreateObjectLineBetweenPositions(
+            string requestedId,
+            string assetIdentifier,
+            string prefab,
+            Vector3 start,
+            Vector3 end,
+            float spacing,
+            Vector3 instanceScale,
+            Vector3 rotationOffset,
+            float lateralOffset,
+            float verticalOffset,
+            bool snapToTerrain,
+            bool alignToSlope,
+            bool placeAtEnd,
+            int maximumInstances)
+        {
+            RequireGraphEditOwnership();
+            RequireSession();
+            if (!_fuseNativeDocument)
+            {
+                throw new InvalidOperationException(
+                    "Repeated-object lines are native FUSE only. Switch the "
+                    + "project format to Native FUSE; legacy RailLoader "
+                    + "splineys cannot represent this feature.");
+            }
+            var length = Vector3.Distance(start, end);
+            if (length < 2f || length > 2000f)
+                throw new InvalidOperationException(
+                    "New object-line endpoints must be between 2 and 2000 m apart.");
+            ValidateObjectLineSettings(
+                assetIdentifier,
+                prefab,
+                spacing,
+                instanceScale,
+                rotationOffset,
+                lateralOffset,
+                verticalOffset,
+                maximumInstances);
+
+            EnsureSplineDocument(_graphPath, _document);
+            var id = UniqueSplineId(requestedId, SplineKind.ObjectLine);
+            var rotation = Quaternion.LookRotation(
+                (end - start).normalized,
+                Vector3.up).eulerAngles;
+            var entry = new JObject
+            {
+                ["points"] = new JArray(
+                    SplinePointToken(start, rotation, null),
+                    SplinePointToken(end, rotation, null)),
+            };
+            WriteObjectLineSettings(
+                entry,
+                assetIdentifier,
+                prefab,
+                spacing,
+                instanceScale,
+                rotationOffset,
+                lateralOffset,
+                verticalOffset,
+                snapToTerrain,
+                alignToSlope,
+                placeAtEnd,
+                maximumInstances);
+            NormalizeSplineEntryForDocument(
+                entry,
+                SplineKind.ObjectLine,
+                true);
+            return AddNewSplineSource(id, SplineKind.ObjectLine, entry);
+        }
+
+        internal void SetSelectedObjectLineSettings(
+            string assetIdentifier,
+            string prefab,
+            float spacing,
+            Vector3 instanceScale,
+            Vector3 rotationOffset,
+            float lateralOffset,
+            float verticalOffset,
+            bool snapToTerrain,
+            bool alignToSlope,
+            bool placeAtEnd,
+            int maximumInstances)
+        {
+            var source = RequireSplinePoint();
+            if (source.Kind != SplineKind.ObjectLine)
+                throw new InvalidOperationException(
+                    "Select a repeated-object line first.");
+            ValidateObjectLineSettings(
+                assetIdentifier,
+                prefab,
+                spacing,
+                instanceScale,
+                rotationOffset,
+                lateralOffset,
+                verticalOffset,
+                maximumInstances);
+            EditSelectedSplinePoint(
+                liveSource => WriteObjectLineSettings(
+                    liveSource.Entry,
+                    assetIdentifier,
+                    prefab,
+                    spacing,
+                    instanceScale,
+                    rotationOffset,
+                    lateralOffset,
+                    verticalOffset,
+                    snapToTerrain,
+                    alignToSlope,
+                    placeAtEnd,
+                    maximumInstances));
         }
 
         internal string CreateTrestleFromSelectedSegment(
@@ -745,11 +1024,14 @@ namespace Hrogers.TileEditorBridge
             var id = UniqueSplineId(requestedId, SplineKind.Trestle);
             var entry = new JObject
             {
-                ["handler"] = "StrangeCustoms.AutoTrestleBuilder",
                 ["points"] = points,
                 ["headStyle"] = NormalizeEndStyle(headStyle),
                 ["tailStyle"] = NormalizeEndStyle(tailStyle),
             };
+            NormalizeSplineEntryForDocument(
+                entry,
+                SplineKind.Trestle,
+                _fuseNativeDocument);
             var created = AddNewSplineSource(
                 id,
                 SplineKind.Trestle,
@@ -803,7 +1085,8 @@ namespace Hrogers.TileEditorBridge
                 FilePath = _graphPath,
                 Document = _document,
                 Entry = entry,
-                Handler = (string)entry["handler"],
+                Handler = (string)entry["handler"]
+                          ?? DefaultSplineHandler(kind),
                 Kind = kind,
             };
             var splineys = EnsureSplineysObject(_document);
@@ -974,6 +1257,19 @@ namespace Hrogers.TileEditorBridge
                 localRotation = point.rotation.eulerAngles;
                 return true;
             }
+            if (source.Kind == SplineKind.ObjectLine
+                && source.LiveObjectLine != null)
+            {
+                var point = RequireObjectLinePoint(source, pointIndex);
+                var owner = source.LiveObjectLine.transform;
+                localPosition = SplinePointFromGame(
+                    owner,
+                    ReadVector(point["position"]));
+                localRotation = SplineRotationFromGame(
+                    owner,
+                    ReadVector(point["rotation"]));
+                return true;
+            }
             return false;
         }
 
@@ -988,7 +1284,7 @@ namespace Hrogers.TileEditorBridge
                 Before = (JObject)source.Entry.DeepClone(),
                 BeforeIndex = _selectedSplinePoint,
                 BeforeExists =
-                    source.Document?["splineys"]?[source.Id]
+                    FindSplineysObject(source.Document)?[source.Id]
                     is JObject,
             };
             mutation(source);
@@ -1071,7 +1367,8 @@ namespace Hrogers.TileEditorBridge
                 || _selectedSplinePoint >= SplinePointCount(source))
             {
                 throw new InvalidOperationException(
-                    "Click a road, river, bridge, or trestle control point first.");
+                    "Click a road, river, bridge, trestle, or object-line "
+                    + "control point first.");
             }
             return source;
         }
@@ -1181,7 +1478,14 @@ namespace Hrogers.TileEditorBridge
                     }
                 }
                 EnsureSplineDocument(path, document);
-                if (!(document["splineys"] is JObject splineys))
+                var splineys = FindSplineysObject(document);
+                if (splineys == null
+                    && IsNativeSplineDocument(document)
+                    && document["splineys"] is JObject)
+                {
+                    splineys = EnsureSplineysObject(document);
+                }
+                if (splineys == null)
                     continue;
                 foreach (var property in splineys.Properties())
                 {
@@ -1196,7 +1500,9 @@ namespace Hrogers.TileEditorBridge
                         FilePath = path,
                         Document = document,
                         Entry = entry,
-                        Handler = (string)entry["handler"] ?? string.Empty,
+                        Handler =
+                            (string)entry["handler"]
+                            ?? DefaultSplineHandler(kind),
                         Kind = kind,
                     };
                 }
@@ -1222,7 +1528,10 @@ namespace Hrogers.TileEditorBridge
                 {
                     break;
                 }
-                if (File.Exists(Path.Combine(current, "Definition.json")))
+                if (File.Exists(Path.Combine(current, "Definition.json"))
+                    || (_fuseNativeDocument
+                        && File.Exists(
+                            Path.Combine(current, "Info.json"))))
                     return current;
                 if (string.Equals(
                         current,
@@ -1264,7 +1573,16 @@ namespace Hrogers.TileEditorBridge
                         StringComparer.Ordinal);
             foreach (var source in _splineSources.Values)
             {
-                if (source.Kind == SplineKind.Trestle)
+                if (source.Kind == SplineKind.ObjectLine)
+                {
+                    var objectLine = FindFuseSpliney(source.Id);
+                    if (objectLine != null)
+                    {
+                        source.LiveObjectLine = objectLine;
+                        source.BuiltWithFuse = true;
+                    }
+                }
+                else if (source.Kind == SplineKind.Trestle)
                 {
                     if (liveTrestles.TryGetValue(
                             source.Id,
@@ -1311,7 +1629,7 @@ namespace Hrogers.TileEditorBridge
             }
         }
 
-        private static JObject CaptureLivePathEntry(RiverPath path)
+        private JObject CaptureLivePathEntry(RiverPath path)
         {
             var kind =
                 path.style == RiverPath.RiverPathStyle.River
@@ -1330,14 +1648,18 @@ namespace Hrogers.TileEditorBridge
                             point.eulerAngles),
                         point.width));
             }
-            return new JObject
+            var entry = new JObject
             {
-                ["handler"] = "StrangeCustoms.FlowyThingBuilder",
                 ["profile"] = LivePathProfile(path, kind),
                 ["style"] = kind.ToString(),
                 ["offsetY"] = path.yOffset,
                 ["points"] = points,
             };
+            NormalizeSplineEntryForDocument(
+                entry,
+                kind,
+                _fuseNativeDocument);
+            return entry;
         }
 
         private static string LivePathProfile(
@@ -1436,7 +1758,11 @@ namespace Hrogers.TileEditorBridge
 
         private void RebuildLiveSpline(SplineSource source)
         {
-            if (source?.LivePath != null)
+            if (source?.Kind == SplineKind.ObjectLine)
+            {
+                UpdateLiveSplineWithFuse(source);
+            }
+            else if (source?.LivePath != null)
             {
                 // RiverPath owns the height, roadbed, dirt, object, water,
                 // and vegetation-mask modifiers. Rebuild removes the old
@@ -1468,6 +1794,13 @@ namespace Hrogers.TileEditorBridge
             // every supported spline kind whenever it is present.
             if (TryBuildLiveSplineWithFuse(source))
                 return;
+
+            if (source.Kind == SplineKind.ObjectLine)
+            {
+                throw new InvalidOperationException(
+                    "Repeated-object lines require FUSE's native spline API. "
+                    + "Install or update FUSE before previewing this mod.");
+            }
 
             var builderType = AppDomain.CurrentDomain.GetAssemblies()
                 .Select(assembly => assembly.GetType(
@@ -1525,6 +1858,9 @@ namespace Hrogers.TileEditorBridge
                     source.Handler + " did not create a live spline.");
             source.LivePath = result.GetComponent<RiverPath>();
             source.LiveTrestle = result.GetComponent<TrestleComponent>();
+            source.LiveObjectLine = source.Kind == SplineKind.ObjectLine
+                ? result
+                : null;
             source.BuiltWithFuse = false;
         }
 
@@ -1555,65 +1891,11 @@ namespace Hrogers.TileEditorBridge
                     + " requires at least two spline points.");
             }
 
-            var definition = Activator.CreateInstance(definitionType);
-            SetPublicProperty(
-                definition,
-                "Type",
-                source.Kind.ToString().ToLowerInvariant());
-            SetPublicProperty(
-                definition,
-                "Profile",
-                ReadEntryString(source.Entry, "profile", null));
-            SetPublicProperty(
-                definition,
-                "Style",
-                ReadEntryString(
-                    source.Entry,
-                    "style",
-                    source.Kind.ToString()));
-            SetPublicProperty(
-                definition,
-                "OffsetY",
-                source.Entry["offsetY"]?.Value<float>() ?? 0f);
-            SetPublicProperty(
-                definition,
-                "HeadStyle",
-                ReadEntryString(source.Entry, "headStyle", "Block"));
-            SetPublicProperty(
-                definition,
-                "TailStyle",
-                ReadEntryString(source.Entry, "tailStyle", "Block"));
-
-            var points = Array.CreateInstance(
+            var definition = CreateFuseSplineyDefinition(
+                source,
+                definitionType,
                 pointType,
-                pointTokens.Count);
-            for (var index = 0; index < pointTokens.Count; index++)
-            {
-                var pointToken = pointTokens[index] as JObject;
-                if (pointToken == null)
-                {
-                    throw new InvalidOperationException(
-                        "Spline point " + (index + 1)
-                        + " is not a valid point object.");
-                }
-                var point = Activator.CreateInstance(pointType);
-                SetPublicProperty(
-                    point,
-                    "Position",
-                    ReadVector(pointToken["position"]));
-                SetPublicProperty(
-                    point,
-                    "Rotation",
-                    ReadVector(pointToken["rotation"]));
-                SetPublicProperty(
-                    point,
-                    "Width",
-                    source.Kind == SplineKind.Trestle
-                        ? (float?)null
-                        : pointToken["width"]?.Value<float>() ?? 3.5f);
-                points.SetValue(point, index);
-            }
-            SetPublicProperty(definition, "Points", points);
+                pointTokens);
 
             var addMethod = apiType.GetMethod(
                 "AddSpliney",
@@ -1654,6 +1936,9 @@ namespace Hrogers.TileEditorBridge
             source.LivePath = result.GetComponent<RiverPath>();
             source.LiveTrestle =
                 result.GetComponent<TrestleComponent>();
+            source.LiveObjectLine = source.Kind == SplineKind.ObjectLine
+                ? result
+                : null;
             source.BuiltWithFuse = true;
             if (source.Kind == SplineKind.Trestle
                 && source.LiveTrestle == null)
@@ -1662,6 +1947,7 @@ namespace Hrogers.TileEditorBridge
                     "FUSE created a spline without an AutoTrestle component.");
             }
             if (source.Kind != SplineKind.Trestle
+                && source.Kind != SplineKind.ObjectLine
                 && source.LivePath == null)
             {
                 throw new InvalidOperationException(
@@ -1689,6 +1975,203 @@ namespace Hrogers.TileEditorBridge
                 + " '" + source.Id
                 + "' with the FUSE spline API.");
             return true;
+        }
+
+        private static object CreateFuseSplineyDefinition(
+            SplineSource source,
+            Type definitionType,
+            Type pointType,
+            JArray pointTokens)
+        {
+            var definition = Activator.CreateInstance(definitionType);
+            SetPublicProperty(
+                definition,
+                "Type",
+                NativeSplineType(source.Kind));
+            SetPublicProperty(
+                definition,
+                "Profile",
+                ReadEntryString(source.Entry, "profile", null));
+            SetPublicProperty(
+                definition,
+                "Style",
+                ReadEntryString(
+                    source.Entry,
+                    "style",
+                    source.Kind.ToString()));
+            SetPublicProperty(
+                definition,
+                "OffsetY",
+                source.Entry["offsetY"]?.Value<float>() ?? 0f);
+            SetPublicProperty(
+                definition,
+                "HeadStyle",
+                ReadEntryString(source.Entry, "headStyle", "Block"));
+            SetPublicProperty(
+                definition,
+                "TailStyle",
+                ReadEntryString(source.Entry, "tailStyle", "Block"));
+
+            if (source.Kind == SplineKind.ObjectLine)
+            {
+                SetPublicProperty(
+                    definition,
+                    "AssetIdentifier",
+                    NullIfWhiteSpace(ReadEntryString(
+                        source.Entry,
+                        "assetIdentifier",
+                        null)));
+                SetPublicProperty(
+                    definition,
+                    "Prefab",
+                    NullIfWhiteSpace(ReadEntryString(
+                        source.Entry,
+                        "prefab",
+                        null)));
+                SetPublicProperty(
+                    definition,
+                    "Spacing",
+                    source.Entry["spacing"]?.Value<float>() ?? 5f);
+                SetPublicProperty(
+                    definition,
+                    "InstanceScale",
+                    ReadVectorOrDefault(
+                        source.Entry["instanceScale"],
+                        Vector3.one));
+                SetPublicProperty(
+                    definition,
+                    "RotationOffset",
+                    ReadVector(source.Entry["rotationOffset"]));
+                SetPublicProperty(
+                    definition,
+                    "LateralOffset",
+                    source.Entry["lateralOffset"]?.Value<float>() ?? 0f);
+                SetPublicProperty(
+                    definition,
+                    "VerticalOffset",
+                    source.Entry["verticalOffset"]?.Value<float>() ?? 0f);
+                SetPublicProperty(
+                    definition,
+                    "SnapToTerrain",
+                    source.Entry["snapToTerrain"]?.Value<bool>() ?? false);
+                SetPublicProperty(
+                    definition,
+                    "AlignToSlope",
+                    source.Entry["alignToSlope"]?.Value<bool>() ?? false);
+                SetPublicProperty(
+                    definition,
+                    "PlaceAtEnd",
+                    source.Entry["placeAtEnd"]?.Value<bool>() ?? true);
+                SetPublicProperty(
+                    definition,
+                    "MaximumInstances",
+                    source.Entry["maximumInstances"]?.Value<int>() ?? 1024);
+            }
+
+            var points = Array.CreateInstance(pointType, pointTokens.Count);
+            for (var index = 0; index < pointTokens.Count; index++)
+            {
+                var pointToken = pointTokens[index] as JObject;
+                if (pointToken == null)
+                {
+                    throw new InvalidOperationException(
+                        "Spline point " + (index + 1)
+                        + " is not a valid point object.");
+                }
+                var point = Activator.CreateInstance(pointType);
+                SetPublicProperty(
+                    point,
+                    "Position",
+                    ReadVector(pointToken["position"]));
+                SetPublicProperty(
+                    point,
+                    "Rotation",
+                    ReadVector(pointToken["rotation"]));
+                SetPublicProperty(
+                    point,
+                    "Width",
+                    source.Kind == SplineKind.Road
+                    || source.Kind == SplineKind.River
+                        ? pointToken["width"]?.Value<float>() ?? 3.5f
+                        : (float?)null);
+                points.SetValue(point, index);
+            }
+            SetPublicProperty(definition, "Points", points);
+            return definition;
+        }
+
+        private void UpdateLiveSplineWithFuse(SplineSource source)
+        {
+            var apiType = FindLoadedType("FUSE.Runtime.API.SplineyAPI");
+            var definitionType = apiType?.Assembly.GetType(
+                "FUSE.Authoring.Data.FuseSpliney",
+                false,
+                false);
+            var pointType = apiType?.Assembly.GetType(
+                "FUSE.Authoring.Data.FuseSplineyPoint",
+                false,
+                false);
+            if (apiType == null || definitionType == null || pointType == null)
+            {
+                throw new InvalidOperationException(
+                    "FUSE's native spline update API is unavailable.");
+            }
+            if (!(source.Entry["points"] is JArray pointTokens)
+                || pointTokens.Count < 2)
+            {
+                throw new InvalidOperationException(
+                    "A repeated-object line requires at least two points.");
+            }
+            var definition = CreateFuseSplineyDefinition(
+                source,
+                definitionType,
+                pointType,
+                pointTokens);
+            var update = apiType.GetMethod(
+                "UpdateSpliney",
+                BindingFlags.Public | BindingFlags.Static,
+                null,
+                new[] { typeof(string), definitionType },
+                null);
+            if (update == null)
+                throw new InvalidOperationException(
+                    "FUSE.SplineyAPI.UpdateSpliney was not found.");
+            try
+            {
+                update.Invoke(null, new[] { (object)source.Id, definition });
+            }
+            catch (TargetInvocationException ex)
+            {
+                throw new InvalidOperationException(
+                    "FUSE could not update repeated-object line '"
+                    + source.Id + "': "
+                    + (ex.InnerException?.Message ?? ex.Message),
+                    ex.InnerException ?? ex);
+            }
+            source.LiveObjectLine = FindFuseSpliney(source.Id)
+                                    ?? source.LiveObjectLine;
+            source.BuiltWithFuse = true;
+        }
+
+        private static GameObject FindFuseSpliney(string id)
+        {
+            var apiType = FindLoadedType("FUSE.Runtime.API.SplineyAPI");
+            var get = apiType?.GetMethod(
+                "GetSpliney",
+                BindingFlags.Public | BindingFlags.Static,
+                null,
+                new[] { typeof(string) },
+                null);
+            if (get == null)
+                return null;
+            try
+            {
+                return get.Invoke(null, new object[] { id }) as GameObject;
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         private static Type FindLoadedType(string fullName)
@@ -1773,12 +2256,18 @@ namespace Hrogers.TileEditorBridge
             }
             source.LivePath = null;
             source.LiveTrestle = null;
+            source.LiveObjectLine = null;
             source.BuiltWithFuse = false;
         }
 
         private void UpdateSplineSourceFromLive(SplineSource source)
         {
             SyncSplineSourceDocument(source);
+            if (source.Kind == SplineKind.ObjectLine)
+            {
+                EnsureSplineysObject(source.Document)[source.Id] = source.Entry;
+                return;
+            }
             var existing = source.Entry["points"] as JArray;
             var points = new JArray();
             var owner = LiveSplineTransform(source);
@@ -1823,6 +2312,8 @@ namespace Hrogers.TileEditorBridge
         private void ApplySplineSourceToLive(SplineSource source)
         {
             if (!(source.Entry["points"] is JArray points))
+                return;
+            if (source.Kind == SplineKind.ObjectLine)
                 return;
             var owner = LiveSplineTransform(source);
             if (owner == null)
@@ -1943,7 +2434,8 @@ namespace Hrogers.TileEditorBridge
                 return;
             }
             source.Document = _document;
-            var current = _document["splineys"]?[source.Id] as JObject;
+            var current = FindSplineysObject(_document)?[source.Id]
+                as JObject;
             if (current != null)
                 source.Entry = current;
             _splineDocuments[source.FilePath] = _document;
@@ -1970,14 +2462,75 @@ namespace Hrogers.TileEditorBridge
             return id;
         }
 
-        private static JObject EnsureSplineysObject(JObject document)
+        private JObject FindSplineysObject(JObject document)
         {
-            if (!(document["splineys"] is JObject splineys))
+            if (document == null)
+                return null;
+            if (!IsNativeSplineDocument(document))
+                return document["splineys"] as JObject;
+            return document["world"]?["splineys"] as JObject;
+        }
+
+        private JObject EnsureSplineysObject(JObject document)
+        {
+            if (document == null)
+                throw new ArgumentNullException(nameof(document));
+            if (!IsNativeSplineDocument(document))
             {
-                splineys = new JObject();
-                document["splineys"] = splineys;
+                if (!(document["splineys"] is JObject legacySplineys))
+                {
+                    legacySplineys = new JObject();
+                    document["splineys"] = legacySplineys;
+                }
+                return legacySplineys;
             }
-            return splineys;
+
+            if (!(document["world"] is JObject world))
+            {
+                world = new JObject();
+                document["world"] = world;
+            }
+            if (!(world["splineys"] is JObject nativeSplineys))
+            {
+                nativeSplineys = new JObject();
+                world["splineys"] = nativeSplineys;
+            }
+            if (document["splineys"] is JObject misplacedSplineys)
+            {
+                foreach (var property in misplacedSplineys
+                             .Properties()
+                             .ToArray())
+                {
+                    if (!(property.Value is JObject sourceEntry)
+                        || !TryKindFromEntry(
+                            sourceEntry,
+                            out var kind))
+                    {
+                        continue;
+                    }
+                    var entry = (JObject)sourceEntry.DeepClone();
+                    NormalizeSplineEntryForDocument(
+                        entry,
+                        kind,
+                        true);
+                    var id = property.Name;
+                    if (nativeSplineys[id] != null
+                        && !JToken.DeepEquals(
+                            nativeSplineys[id],
+                            entry))
+                    {
+                        id = NextMigratedSplineId(
+                            nativeSplineys,
+                            id);
+                    }
+                    if (nativeSplineys[id] == null)
+                        nativeSplineys[id] = entry;
+                }
+                document.Remove("splineys");
+                if (ReferenceEquals(document, _document))
+                    _dirty = true;
+            }
+            return nativeSplineys;
         }
 
         private static int SplinePointCount(SplineSource source)
@@ -1986,6 +2539,8 @@ namespace Hrogers.TileEditorBridge
                 return source.LivePath.points?.Count ?? 0;
             if (source?.LiveTrestle != null)
                 return source.LiveTrestle.controlPoints?.Count ?? 0;
+            if (source?.Kind == SplineKind.ObjectLine)
+                return (source.Entry?["points"] as JArray)?.Count ?? 0;
             return 0;
         }
 
@@ -1993,6 +2548,8 @@ namespace Hrogers.TileEditorBridge
         {
             if (source?.LivePath != null)
                 return source.LivePath.transform;
+            if (source?.LiveObjectLine != null)
+                return source.LiveObjectLine.transform;
             return source?.LiveTrestle == null
                 ? null
                 : source.LiveTrestle.transform;
@@ -2002,18 +2559,27 @@ namespace Hrogers.TileEditorBridge
             SplineSource source,
             int index)
         {
-            return source.LivePath != null
-                ? source.LivePath.points[index].position
-                : source.LiveTrestle.controlPoints[index].position;
+            if (source.LivePath != null)
+                return source.LivePath.points[index].position;
+            if (source.LiveTrestle != null)
+                return source.LiveTrestle.controlPoints[index].position;
+            return SplinePointFromGame(
+                LiveSplineTransform(source),
+                ReadVector(RequireObjectLinePoint(source, index)["position"]));
         }
 
         private static Vector3 SplinePointLocalRotation(
             SplineSource source,
             int index)
         {
-            return source.LivePath != null
-                ? source.LivePath.points[index].eulerAngles
-                : source.LiveTrestle.controlPoints[index].rotation.eulerAngles;
+            if (source.LivePath != null)
+                return source.LivePath.points[index].eulerAngles;
+            if (source.LiveTrestle != null)
+                return source.LiveTrestle.controlPoints[index]
+                    .rotation.eulerAngles;
+            return SplineRotationFromGame(
+                LiveSplineTransform(source),
+                ReadVector(RequireObjectLinePoint(source, index)["rotation"]));
         }
 
         private static Vector3 SplinePointPosition(
@@ -2041,6 +2607,32 @@ namespace Hrogers.TileEditorBridge
             return source.LivePath == null
                 ? 0f
                 : source.LivePath.points[index].width;
+        }
+
+        private static JArray RequireObjectLinePoints(SplineSource source)
+        {
+            if (source?.Kind != SplineKind.ObjectLine
+                || !(source.Entry?["points"] is JArray points))
+            {
+                throw new InvalidOperationException(
+                    "The selected repeated-object line has no point list.");
+            }
+            return points;
+        }
+
+        private static JObject RequireObjectLinePoint(
+            SplineSource source,
+            int index)
+        {
+            var points = RequireObjectLinePoints(source);
+            if (index < 0 || index >= points.Count
+                || !(points[index] is JObject point))
+            {
+                throw new InvalidOperationException(
+                    "Repeated-object line point " + (index + 1)
+                    + " is invalid.");
+            }
+            return point;
         }
 
         private static Vector3 SplinePointToGame(
@@ -2114,6 +2706,52 @@ namespace Hrogers.TileEditorBridge
             JObject entry,
             out SplineKind kind)
         {
+            var nativeType =
+                ((string)entry?["type"] ?? string.Empty).Trim();
+            if (string.Equals(
+                    nativeType,
+                    "objectLine",
+                    StringComparison.OrdinalIgnoreCase)
+                || string.Equals(
+                    nativeType,
+                    "object-line",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                kind = SplineKind.ObjectLine;
+                return true;
+            }
+            if (string.Equals(
+                    nativeType,
+                    "trestle",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                kind = SplineKind.Trestle;
+                return true;
+            }
+            if (string.Equals(
+                    nativeType,
+                    "river",
+                    StringComparison.OrdinalIgnoreCase)
+                || string.Equals(
+                    nativeType,
+                    "waterfall",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                kind = SplineKind.River;
+                return true;
+            }
+            if (string.Equals(
+                    nativeType,
+                    "road",
+                    StringComparison.OrdinalIgnoreCase)
+                || string.Equals(
+                    nativeType,
+                    "terrainRoad",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                kind = SplineKind.Road;
+                return true;
+            }
             var handler = (string)entry?["handler"] ?? string.Empty;
             if (handler.IndexOf(
                     "AutoTrestle",
@@ -2138,6 +2776,68 @@ namespace Hrogers.TileEditorBridge
             return false;
         }
 
+        private bool IsNativeSplineDocument(JObject document)
+        {
+            if (document == null)
+                return false;
+            if (ReferenceEquals(document, _document))
+                return _fuseNativeDocument;
+            return document["schemaVersion"] != null
+                   && document["id"] != null;
+        }
+
+        private static void NormalizeSplineEntryForDocument(
+            JObject entry,
+            SplineKind kind,
+            bool fuseNative)
+        {
+            if (entry == null)
+                throw new ArgumentNullException(nameof(entry));
+            if (fuseNative)
+            {
+                entry.Remove("handler");
+                entry["type"] = NativeSplineType(kind);
+                return;
+            }
+            if (kind == SplineKind.ObjectLine)
+            {
+                throw new InvalidOperationException(
+                    "Repeated-object lines cannot be exported to the legacy "
+                    + "RailLoader spline schema. Use Native FUSE format.");
+            }
+            entry.Remove("type");
+            entry["handler"] = LegacySplineHandler(kind);
+        }
+
+        private static string LegacySplineHandler(SplineKind kind)
+        {
+            if (kind == SplineKind.ObjectLine)
+                throw new InvalidOperationException(
+                    "Legacy RailLoader has no repeated-object-line handler.");
+            return kind == SplineKind.Trestle
+                ? "StrangeCustoms.AutoTrestleBuilder"
+                : "StrangeCustoms.FlowyThingBuilder";
+        }
+
+        private static string DefaultSplineHandler(SplineKind kind)
+        {
+            return kind == SplineKind.ObjectLine
+                ? string.Empty
+                : LegacySplineHandler(kind);
+        }
+
+        private static string NextMigratedSplineId(
+            JObject splineys,
+            string baseId)
+        {
+            var prefix = (baseId ?? "spline") + ".migrated";
+            var candidate = prefix;
+            var sequence = 2;
+            while (splineys[candidate] != null)
+                candidate = prefix + sequence++;
+            return candidate;
+        }
+
         private static SplineKind KindFromEntry(JObject entry)
         {
             if (TryKindFromEntry(entry, out var kind))
@@ -2148,6 +2848,21 @@ namespace Hrogers.TileEditorBridge
 
         private static SplineKind ParseSplineKind(string kind)
         {
+            if (string.Equals(
+                    kind,
+                    "ObjectLine",
+                    StringComparison.OrdinalIgnoreCase)
+                || string.Equals(
+                    kind,
+                    "Object Line",
+                    StringComparison.OrdinalIgnoreCase)
+                || string.Equals(
+                    kind,
+                    "Fence / Wall",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return SplineKind.ObjectLine;
+            }
             if (string.Equals(
                     kind,
                     "Bridge",
@@ -2174,7 +2889,102 @@ namespace Hrogers.TileEditorBridge
                 return SplineKind.Road;
             }
             throw new InvalidOperationException(
-                "Spline type must be Road, River, or Bridge/Trestle.");
+                "Spline type must be Road, River, Bridge/Trestle, or ObjectLine.");
+        }
+
+        private static string NativeSplineType(SplineKind kind)
+        {
+            return kind == SplineKind.ObjectLine
+                ? "objectLine"
+                : kind.ToString().ToLowerInvariant();
+        }
+
+        private static void ValidateObjectLineSettings(
+            string assetIdentifier,
+            string prefab,
+            float spacing,
+            Vector3 instanceScale,
+            Vector3 rotationOffset,
+            float lateralOffset,
+            float verticalOffset,
+            int maximumInstances)
+        {
+            var hasAsset = !string.IsNullOrWhiteSpace(assetIdentifier);
+            var hasPrefab = !string.IsNullOrWhiteSpace(prefab);
+            if (hasAsset == hasPrefab)
+            {
+                throw new InvalidOperationException(
+                    "Choose exactly one object source: a loaded asset identifier "
+                    + "or a safe scene prefab path.");
+            }
+            if (float.IsNaN(spacing) || float.IsInfinity(spacing)
+                || spacing <= 0f || spacing > 1000f)
+            {
+                throw new InvalidOperationException(
+                    "Object spacing must be greater than 0 and no more than 1000 m.");
+            }
+            ValidateVector(instanceScale, "object-line scale");
+            if (instanceScale.x <= 0f
+                || instanceScale.y <= 0f
+                || instanceScale.z <= 0f)
+            {
+                throw new InvalidOperationException(
+                    "Object-line scale must be greater than zero on every axis.");
+            }
+            ValidateVector(rotationOffset, "object-line rotation offset");
+            if (float.IsNaN(lateralOffset)
+                || float.IsInfinity(lateralOffset)
+                || float.IsNaN(verticalOffset)
+                || float.IsInfinity(verticalOffset))
+            {
+                throw new InvalidOperationException(
+                    "Object-line offsets must be finite numbers.");
+            }
+            if (maximumInstances < 1 || maximumInstances > 4096)
+            {
+                throw new InvalidOperationException(
+                    "Object-line maximum instances must be between 1 and 4096.");
+            }
+        }
+
+        private static void WriteObjectLineSettings(
+            JObject entry,
+            string assetIdentifier,
+            string prefab,
+            float spacing,
+            Vector3 instanceScale,
+            Vector3 rotationOffset,
+            float lateralOffset,
+            float verticalOffset,
+            bool snapToTerrain,
+            bool alignToSlope,
+            bool placeAtEnd,
+            int maximumInstances)
+        {
+            var asset = NullIfWhiteSpace(assetIdentifier);
+            var scenePrefab = NullIfWhiteSpace(prefab);
+            if (asset == null)
+                entry.Remove("assetIdentifier");
+            else
+                entry["assetIdentifier"] = asset;
+            if (scenePrefab == null)
+                entry.Remove("prefab");
+            else
+                entry["prefab"] = scenePrefab;
+            entry["spacing"] = spacing;
+            entry["instanceScale"] = Vector(instanceScale);
+            entry["rotationOffset"] = Vector(rotationOffset);
+            entry["lateralOffset"] = lateralOffset;
+            entry["verticalOffset"] = verticalOffset;
+            entry["snapToTerrain"] = snapToTerrain;
+            entry["alignToSlope"] = alignToSlope;
+            entry["placeAtEnd"] = placeAtEnd;
+            entry["maximumInstances"] = maximumInstances;
+        }
+
+        private static string NullIfWhiteSpace(string value)
+        {
+            return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
         }
 
         private static string NormalizeEndStyle(string value)
@@ -2222,6 +3032,13 @@ namespace Hrogers.TileEditorBridge
                 (float?)token?["x"] ?? 0f,
                 (float?)token?["y"] ?? 0f,
                 (float?)token?["z"] ?? 0f);
+        }
+
+        private static Vector3 ReadVectorOrDefault(
+            JToken token,
+            Vector3 fallback)
+        {
+            return token == null ? fallback : ReadVector(token);
         }
     }
 
@@ -2332,7 +3149,12 @@ namespace Hrogers.TileEditorBridge
                             "Trestle",
                             StringComparison.OrdinalIgnoreCase)
                             ? new Color(0.35f, 1f, 0.35f)
-                            : new Color(1f, 0.62f, 0.15f));
+                            : string.Equals(
+                                _kind,
+                                "ObjectLine",
+                                StringComparison.OrdinalIgnoreCase)
+                                ? new Color(0.78f, 0.38f, 1f)
+                                : new Color(1f, 0.62f, 0.15f));
         }
 
         private void BuildVisual()

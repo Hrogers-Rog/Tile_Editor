@@ -244,6 +244,10 @@ class PackageVersionTests(unittest.TestCase):
         self.assertIn("CreateIndustry(", session_source)
         self.assertIn("AddIndustryComponent(", session_source)
         self.assertIn("CreatePhysicalLoader(", session_source)
+        self.assertIn("RemoveBaseIndustry(", session_source)
+        self.assertIn('"Remove base-game industry"', session_source)
+        self.assertIn('removals["industries"]', session_source)
+        self.assertIn('"ADD INDUSTRY REMOVAL"', panel_source)
         self.assertIn("ExecuteOperationsEdit(", session_source)
         self.assertIn("BeforeDocument", session_source)
         self.assertIn(
@@ -1360,6 +1364,12 @@ class PackageVersionTests(unittest.TestCase):
         self.assertIn("TerrainBrushMode.Smooth", panel_source)
         self.assertIn("TerrainBrushMode.Vegetation", panel_source)
         self.assertIn("TerrainBrushMode.Water", panel_source)
+        self.assertIn('"0 Full"', panel_source)
+        self.assertIn('"7 Clear"', panel_source)
+        self.assertIn(
+            "These are vegetation-density levels, not fixed biomes.",
+            panel_source,
+        )
         self.assertIn("TerrainWorkspace.Sculpt", panel_source)
         self.assertIn('"SURFACE PAINT"', panel_source)
         self.assertIn("Building Pad", panel_source)
@@ -1372,6 +1382,8 @@ class PackageVersionTests(unittest.TestCase):
         self.assertIn("SetHeightsDelayLOD(", session_source)
         self.assertIn("GetRawTextureData<byte>()", session_source)
         self.assertIn("SaveTerrainTiles()", session_source)
+        self.assertIn("manager.Invalidate(key);", session_source)
+        self.assertIn("manager.RebuildAll();", session_source)
         self.assertIn("tile-editor-backup-", session_source)
         self.assertIn("ImageConversion.EncodeToPNG", session_source)
         self.assertIn("Mathf.MoveTowards(", session_source)
@@ -1812,6 +1824,7 @@ class PackageVersionTests(unittest.TestCase):
             "const float pickHalo = 18f;",
             session_source,
         )
+        self.assertIn('CompareTag("TrackMeshGenerated")', session_source)
         self.assertIn("MoveSelectedMandela", session_source)
         self.assertIn("RotateSelectedMandela", session_source)
         self.assertIn("CloneSelectedMandelaAtWorldPosition", session_source)
@@ -1830,6 +1843,29 @@ class PackageVersionTests(unittest.TestCase):
         self.assertIn("RestoreMandelaModels(edit, after);", graph_source)
         self.assertIn("BeforeMandelas", graph_source)
         self.assertIn("AfterMandelas", graph_source)
+
+    def test_native_fuse_is_recommended_and_tight_turnouts_warn(self):
+        root = Path(__file__).resolve().parent.parent
+        panel_source = (
+            root / "TileEditorBridge" / "TileEditorGeoPanel.cs"
+        ).read_text(encoding="utf-8")
+        desktop_source = (
+            root / "edit_tiles" / "app.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('"Native FUSE",\n                    "Legacy RL"', panel_source)
+        self.assertIn("_newModFormat == 0", panel_source)
+        self.assertIn("TryDescribeTurnoutGeometry(", panel_source)
+        self.assertIn("radius < 35f", panel_source)
+        self.assertIn("TRACK MAY NOT RENDER", panel_source)
+        self.assertIn(
+            'fuse_label = "Native FUSE package (Recommended)"',
+            desktop_source,
+        )
+        self.assertIn(
+            'compatible_label = "Legacy RailLoader package (Limited)"',
+            desktop_source,
+        )
 
     def test_geo_rebuild_track_button_is_beside_rebuild_terrain(self):
         root = Path(__file__).resolve().parent.parent
@@ -1903,7 +1939,14 @@ class PackageVersionTests(unittest.TestCase):
                 json.dumps({
                     "schemaVersion": "1.0",
                     "tracks": {
-                        "nodes": {},
+                        "nodes": {
+                            "n3": {
+                                "position": {"x": 0, "y": 1, "z": 2},
+                                "rotation": {"x": 0, "y": 90, "z": 0},
+                                "isDiamond": True,
+                                "tags": ["crossing"],
+                            }
+                        },
                         "segments": {
                             "s2": {
                                 "startNodeId": "n3",
@@ -1911,6 +1954,9 @@ class PackageVersionTests(unittest.TestCase):
                                 "trackClass": "branch",
                                 "style": "yard",
                                 "gauge": "Narrow",
+                                "bridgeSupportsSteel": True,
+                                "yard": True,
+                                "companionData": {"keep": True},
                             }
                         },
                     },
@@ -1919,16 +1965,23 @@ class PackageVersionTests(unittest.TestCase):
             )
             fuse = Layer(fuse_path, "graph", (1, 2, 3), "fuse")
             fuse.load()
+            fuse.set_node("n3", 5, 6, 7, 0, 45, 0)
             fuse.set_segment(
                 "s2", "n3", "n4", "Branch", "Yard", 10, 0, "",
                 "DualGauge_R",
             )
             fuse_raw = fuse._raw["tracks"]["segments"]["s2"]
+            fuse_node_raw = fuse._raw["tracks"]["nodes"]["n3"]
             self.assertEqual(fuse.track_schema, "fuse")
             self.assertEqual(fuse_raw["startNodeId"], "n3")
             self.assertEqual(fuse_raw["endNodeId"], "n4")
             self.assertNotIn("startId", fuse_raw)
             self.assertEqual(fuse_raw["gauge"], "DualGauge_R")
+            self.assertTrue(fuse_raw["bridgeSupportsSteel"])
+            self.assertTrue(fuse_raw["yard"])
+            self.assertEqual(fuse_raw["companionData"], {"keep": True})
+            self.assertTrue(fuse_node_raw["isDiamond"])
+            self.assertEqual(fuse_node_raw["tags"], ["crossing"])
 
     def test_f9_supports_gauges_and_native_fuse_track_fragments(self):
         root = Path(__file__).resolve().parent.parent
@@ -2373,6 +2426,10 @@ class PackageVersionTests(unittest.TestCase):
         project_source = (
             runtime / "Hrogers.SignalRuntime.csproj"
         ).read_text(encoding="utf-8")
+        signal_schema = json.loads(
+            (runtime / "train-signals.schema.json").read_text(
+                encoding="utf-8")
+        )
         panel_source = (
             root / "TileEditorBridge" / "TileEditorTrainSignalPanel.cs"
         ).read_text(encoding="utf-8")
@@ -2387,6 +2444,13 @@ class PackageVersionTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
         self.assertIn('"train-signals.json"', registry_source)
+        self.assertIn("train-signals.schema.json", project_source)
+        self.assertEqual(signal_schema["properties"]["formatVersion"]["const"], 1)
+        self.assertEqual(
+            signal_schema["properties"]["signals"]["items"]["properties"]
+            ["headCount"]["maximum"],
+            3,
+        )
         self.assertIn("Signal BR-E Main", registry_source)
         self.assertIn("Signal BR-E Enter", registry_source)
         self.assertIn("GetComponentsInChildren<CTCSignal>", registry_source)
@@ -2508,8 +2572,16 @@ class PackageVersionTests(unittest.TestCase):
             runtime / "TrainSignalRegistry.cs"
         ).read_text(encoding="utf-8")
         main_source = (runtime / "Main.cs").read_text(encoding="utf-8")
+        package_support = (
+            bridge / "TileEditorSignalPackageSupport.cs"
+        ).read_text(encoding="utf-8")
 
         self.assertIn('"ctc-system.json"', session_source)
+        self.assertIn('["trainOrders"] = new JArray()', session_source)
+        self.assertIn('AddCtcTerritoryMember("controlPointIds", id)', session_source)
+        self.assertIn('AddCtcTerritoryMember("blockIds", id)', session_source)
+        self.assertIn('SignalRuntimePackageId = "AITraffic"', package_support)
+        self.assertIn("EnsureSignalRuntimeRequirement();", session_source)
         self.assertIn("CreateCtcControlPointFromSelectedNode", session_source)
         self.assertIn("CreateCtcBlockFromSelectedSegment", session_source)
         self.assertIn("AddSelectedSegmentToCtcBlock", session_source)
@@ -2624,6 +2696,282 @@ class PackageVersionTests(unittest.TestCase):
         self.assertIn("InitializeEmbedded", main_source)
         self.assertIn("EmbeddedHarmonyId", main_source)
         self.assertIn('<Reference Include="0Harmony">', project_source)
+
+
+class NativeServiceFacilityContractTests(unittest.TestCase):
+    def test_native_scenery_uses_world_and_asset_identifier(self):
+        root = Path(__file__).resolve().parent.parent
+        source = (
+            root / "TileEditorBridge" / "TileEditorScenerySession.cs"
+        ).read_text(encoding="utf-8")
+
+        native_container = source.split(
+            "internal static JObject EnsureSceneryObjectForDocument(", 1
+        )[1].split(
+            "internal static void WriteSceneryAssetIdentifier(", 1
+        )[0]
+        native_identifier = source.split(
+            "internal static void WriteSceneryAssetIdentifier(", 1
+        )[1].split(
+            "private static string NextMigratedSceneryId(", 1
+        )[0]
+        self.assertIn('document["world"]', native_container)
+        self.assertIn('world["scenery"]', native_container)
+        self.assertIn('document.Remove("scenery")', native_container)
+        self.assertIn("NextMigratedSceneryId(", native_container)
+        self.assertIn('entry["assetIdentifier"]', native_identifier)
+        self.assertIn('"scenery://" + identifier', native_identifier)
+        self.assertIn('entry.Remove("modelIdentifier")', native_identifier)
+        self.assertIn('entry["modelIdentifier"]', native_identifier)
+
+    def test_toolshed_custom_loader_is_one_undoable_native_action(self):
+        root = Path(__file__).resolve().parent.parent
+        bridge = root / "TileEditorBridge"
+        session = (
+            bridge / "TileEditorOperationsSession.cs"
+        ).read_text(encoding="utf-8")
+        graph = (
+            bridge / "TileEditorGraphSession.cs"
+        ).read_text(encoding="utf-8")
+        panel = (
+            bridge / "TileEditorOperationsPanel.cs"
+        ).read_text(encoding="utf-8")
+        pointer = (
+            bridge / "TileEditorWorldPointer.cs"
+        ).read_text(encoding="utf-8")
+
+        create = session.split(
+            "internal string CreateToolshedServiceFacility(", 1
+        )[1].split(
+            "internal string RefreshToolshedServiceAssets(", 1
+        )[0]
+        self.assertIn("if (!_fuseNativeDocument)", create)
+        self.assertIn("EnsureSceneryObjectForDocument(", create)
+        self.assertIn("WriteSceneryAssetIdentifier(", create)
+        self.assertIn('binding["serviceTrackSpanIds"]', create)
+        self.assertIn("_toolshedFacilitiesDirty = true", create)
+        self.assertIn("BeforeToolshedFacilities", graph)
+        self.assertIn("AfterToolshedFacilities", graph)
+        self.assertIn("SaveToolshedFacilities();", graph)
+        self.assertIn("PLACE CUSTOM TOOLSHED FACILITY", panel)
+        self.assertIn("FIND INSTALLED TOOLSHED ASSETS", panel)
+        self.assertIn("OperationsToolshedFacility", pointer)
+        self.assertIn("CreateToolshedServiceFacilitySnapped", pointer)
+
+    def test_legacy_mode_disables_every_native_only_operations_control(self):
+        root = Path(__file__).resolve().parent.parent
+        panel = (
+            root / "TileEditorBridge" / "TileEditorOperationsPanel.cs"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("LIMITED LEGACY MODE", panel)
+        self.assertGreaterEqual(
+            panel.count("GUI.enabled = _mapEditor.FuseOperationsDocument;"),
+            3,
+        )
+        self.assertIn("ADD INDUSTRY REMOVAL", panel)
+        self.assertIn("PLACE STATION AGENT WITH POINTER", panel)
+        self.assertIn("PLACE CUSTOM TOOLSHED FACILITY WITH POINTER", panel)
+        self.assertIn("Unsupported controls are disabled", panel)
+
+    def test_toolshed_catalog_reads_authored_load_point_components(self):
+        root = Path(__file__).resolve().parent.parent
+        source = (
+            root / "TileEditorBridge" / "TileEditorOperationsSession.cs"
+        ).read_text(encoding="utf-8")
+
+        discovery = source.split(
+            "private static void DiscoverToolshedServiceAssets(", 1
+        )[1].split(
+            "private void EnsureToolshedFacilitiesLoaded(", 1
+        )[0]
+        self.assertIn('"Definitions.json"', source)
+        self.assertIn('"ToolshedServiceLoadPoint"', discovery)
+        self.assertIn('component["loadPointId"]', discovery)
+        self.assertIn('component["serviceLoadId"]', discovery)
+
+    def test_native_splineys_use_world_schema_without_legacy_handlers(self):
+        root = Path(__file__).resolve().parent.parent
+        source = (
+            root / "TileEditorBridge" / "TileEditorSplineySession.cs"
+        ).read_text(encoding="utf-8")
+
+        container = source.split(
+            "private JObject EnsureSplineysObject(JObject document)", 1
+        )[1].split(
+            "private static int SplinePointCount(", 1
+        )[0]
+        normalizer = source.split(
+            "private static void NormalizeSplineEntryForDocument(", 1
+        )[1].split(
+            "private static string LegacySplineHandler(", 1
+        )[0]
+        kind_reader = source.split(
+            "private static bool TryKindFromEntry(", 1
+        )[1].split(
+            "private bool IsNativeSplineDocument(", 1
+        )[0]
+
+        self.assertIn('document["world"]', container)
+        self.assertIn('world["splineys"]', container)
+        self.assertIn('document.Remove("splineys")', container)
+        self.assertIn("NextMigratedSplineId(", container)
+        self.assertIn('entry.Remove("handler")', normalizer)
+        self.assertIn('entry["type"]', normalizer)
+        self.assertIn('entry.Remove("type")', normalizer)
+        self.assertIn('entry["handler"]', normalizer)
+        self.assertIn('entry?["type"]', kind_reader)
+
+    def test_native_object_lines_cover_fences_walls_and_legacy_limits(self):
+        root = Path(__file__).resolve().parent.parent
+        bridge = root / "TileEditorBridge"
+        session = (bridge / "TileEditorSplineySession.cs").read_text(
+            encoding="utf-8"
+        )
+        panel = (bridge / "TileEditorGeoPanel.cs").read_text(
+            encoding="utf-8"
+        )
+        pointer = (bridge / "TileEditorWorldPointer.cs").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("CreateObjectLineBetweenPositions(", session)
+        self.assertIn("SetSelectedObjectLineSettings(", session)
+        self.assertIn('return kind == SplineKind.ObjectLine\n                ? "objectLine"', session)
+        self.assertIn("UpdateSpliney", session)
+        self.assertIn("Fence / Wall", panel)
+        self.assertIn("Native FUSE only", panel)
+        self.assertIn("Snap each module to terrain", panel)
+        self.assertIn("Safety limit (instances)", panel)
+        self.assertIn("CreateObjectLineBetweenPositions(", pointer)
+        self.assertIn("Legacy RailLoader splineys cannot store repeated", panel)
+        self.assertIn("objects. Create or convert the project as Native", panel)
+
+    def test_native_scene_objects_use_scene_clone_contract(self):
+        root = Path(__file__).resolve().parent.parent
+        source = (
+            root / "TileEditorBridge" / "TileEditorMandelaSession.cs"
+        ).read_text(encoding="utf-8")
+
+        writer = source.split(
+            "private void WriteMandela(", 1
+        )[1].split(
+            "private JObject MandelasObject", 1
+        )[0]
+        container = source.split(
+            "private JObject MandelasObject", 1
+        )[1].split(
+            "private string ReadMandelaSourcePath(string targetPath)", 1
+        )[0]
+        identifier = source.split(
+            "private static string MandelaDefinitionId(", 1
+        )[1].split(
+            "private static string NextMigratedMandelaId(", 1
+        )[0]
+
+        self.assertIn('entry["targetPath"]', writer)
+        self.assertIn('entry["source"] = NativeMandelaSource', writer)
+        self.assertIn('entry.Remove("instantiateFrom")', writer)
+        self.assertIn('entry["instantiateFrom"]', writer)
+        self.assertIn('world["sceneClones"]', container)
+        self.assertIn('_document.Remove("mandelas")', container)
+        self.assertIn("ConvertMandelaEntryToNative", container)
+        self.assertIn('return "scene-" + Convert.ToBase64String', identifier)
+
+    def test_native_base_pole_moves_do_not_emit_alina_splineys(self):
+        root = Path(__file__).resolve().parent.parent
+        source = (
+            root / "TileEditorBridge" / "TileEditorTelegraphPoleSession.cs"
+        ).read_text(encoding="utf-8")
+
+        discovery = source.split(
+            "private void EnsureTelegraphPoleSources()", 1
+        )[1].split(
+            "private TelegraphPoleSource EnsureTelegraphPoleSource()", 1
+        )[0]
+        create = source.split(
+            "private TelegraphPoleSource EnsureTelegraphPoleSource()", 1
+        )[1].split(
+            "private TelegraphPoleSource FindTelegraphPoleSource(", 1
+        )[0]
+        native_writer = source.split(
+            "private static void WriteNativePoleOffset(", 1
+        )[1].split(
+            "private static JToken ReadEntryValue(", 1
+        )[0]
+
+        self.assertIn("if (_fuseNativeDocument)", discovery)
+        self.assertIn("NativeTelegraphPoleMovements(false)", discovery)
+        self.assertIn("if (_fuseNativeDocument)", create)
+        self.assertIn("NativeTelegraphPoleMovements(true)", create)
+        self.assertIn('["poleIndices"]', native_writer)
+        self.assertIn('["offset"] = Vector(offset)', native_writer)
+        self.assertNotIn("TelegraphPoleMover", native_writer)
+
+    def test_f9_new_project_supports_native_standalone_map_scaffold(self):
+        root = Path(__file__).resolve().parent.parent
+        session = (
+            root / "TileEditorBridge" / "TileEditorGraphSession.cs"
+        ).read_text(encoding="utf-8")
+        panel = (
+            root / "TileEditorBridge" / "TileEditorGeoPanel.cs"
+        ).read_text(encoding="utf-8")
+
+        creator = session.split(
+            "internal string CreateNewMapMod(", 1
+        )[1].split(
+            "private static bool IsPortableModId", 1
+        )[0]
+        self.assertIn("completeMap && !nativeFuse", creator)
+        self.assertIn('["mapFolder"] = "Map"', creator)
+        self.assertIn('["suppressBaseWorld"] = true', creator)
+        self.assertIn('Path.Combine(mapFolder, "Map.json")', creator)
+        self.assertIn('["tileDimension"] = 500d', creator)
+        self.assertIn('"Stock-map add-on"', panel)
+        self.assertIn('"Standalone map"', panel)
+        self.assertIn("Launch the new map from the main menu", panel)
+
+    def test_passenger_editor_writes_native_and_legacy_branch_details(self):
+        root = Path(__file__).resolve().parent.parent
+        panel = (
+            root / "TileEditorBridge" / "TileEditorOperationsPanel.cs"
+        ).read_text(encoding="utf-8")
+        session = (
+            root / "TileEditorBridge" / "TileEditorOperationsSession.cs"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('"Time to next stop (min)"', panel)
+        self.assertIn('"Required map feature"', panel)
+        self.assertIn("id|code|minutes, one per line", panel)
+        self.assertIn("BuildPassengerBranchDefinition(", session)
+        self.assertIn('? "branchDefinitions"\n                                : "branches"', session)
+        self.assertIn('fuseNative ? "intermediates" : "Intermediates"', session)
+        self.assertIn('["code"] = code', session)
+        self.assertIn('["Code"] = code', session)
+
+    def test_water_workspace_is_native_and_uses_fuse_runtime_contract(self):
+        root = Path(__file__).resolve().parent.parent
+        geo = (
+            root / "TileEditorBridge" / "TileEditorGeoPanel.cs"
+        ).read_text(encoding="utf-8")
+        panel = (
+            root / "TileEditorBridge" / "TileEditorWaterPanel.cs"
+        ).read_text(encoding="utf-8")
+        session = (
+            root / "TileEditorBridge" / "TileEditorWaterSession.cs"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("PanelTab.Water", geo)
+        self.assertIn('"WATER"', geo)
+        self.assertIn('"NATIVE FUSE ONLY"', panel)
+        self.assertIn("GUI.enabled = false", panel)
+        self.assertIn('world["waterSurfaces"]', session)
+        self.assertIn('FindLoadedType("FUSE.Runtime.API.WaterSurfaceAPI")', session)
+        self.assertIn('"suppressBaseScenePaths"', session)
+        self.assertIn("ReplaceBaseLake", session)
+        self.assertIn("_baseLakeOriginalActiveStates", session)
+        self.assertIn("IsScenePathSuppressedByFuse", session)
+        self.assertIn("SyncEditorHiddenBaseLakes(current)", session)
 
 
 if __name__ == "__main__":

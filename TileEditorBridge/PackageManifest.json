@@ -1,7 +1,7 @@
 {
   "packageId": "Hrogers.TileEditorBridge",
   "displayName": "Hrogers Tile Editor Suite",
-  "version": "0.26.4",
+  "version": "0.26.8",
   "bridgeProtocolVersion": 1,
   "game": "Railroader",
   "loader": "Unity Mod Manager",

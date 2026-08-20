@@ -8,6 +8,7 @@ workspace that edits the same data live.
 | Doc | What it covers |
 | --- | --- |
 | [Getting Started](GETTING_STARTED.md) | Install, run, and a first editing session |
+| [Feature And Workspace Index](FEATURE_INDEX.md) | Find the workspace that owns a remembered task |
 | [Keybind Reference](KEYBINDS.md) | Every keyboard and mouse binding |
 
 ## Editing
@@ -18,6 +19,7 @@ workspace that edits the same data live.
 | [Track Editing](TRACK_EDITING.md) | Nodes, segments, connecting, gauge, geometry tools |
 | [Mod Tools](MOD_TOOLS.md) | Layers, progression, areas, scenery, mandelas, spans, calculators |
 | [In-Game Geo Workspace](IN_GAME_GEO.md) | The F9 editor, signals, operations, and two-way sync |
+| [Operations And Signals](OPERATIONS_AND_SIGNALS.md) | Industries, spans, loaders, passenger service, semaphores, interlockings |
 
 ## Data
 

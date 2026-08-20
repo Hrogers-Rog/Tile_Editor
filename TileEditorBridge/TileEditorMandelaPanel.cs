@@ -30,8 +30,8 @@ namespace Hrogers.TileEditorBridge
             GUILayout.Label("BASE-GAME OBJECTS", _titleStyle);
             GUILayout.Label(
                 "Click a building, prop, or other base-game object in the "
-                + "world. Changes save as a RailLoader mandela and are also "
-                + "read by FUSE as a scene clone.",
+                + "world. Native projects save a FUSE scene clone; legacy "
+                + "projects save a RailLoader mandela.",
                 _lineStyle);
 
             if (_mapEditor == null || !_mapEditor.GraphOpen)

@@ -43,7 +43,9 @@ are in [KEYBINDS.md](KEYBINDS.md).
 
 ## First Session: Editing Track
 
-1. **Mod → Open Mod Folder** and pick a mod folder (it needs a `Definition.json`).
+1. Open an existing map with **Mod → Open Mod Folder**, or choose **New Mod** to
+   create one from scratch. Existing packages may use RailLoader
+   `Definition.json` or native FUSE `Info.json`.
 2. The map shows every track layer, coloured by source file.
 3. **Click a node** — its properties appear top-left.
 4. **Drag a selected node** to move it. Terrain height is sampled automatically on
@@ -53,6 +55,30 @@ are in [KEYBINDS.md](KEYBINDS.md).
    segment.
 7. Changes auto-save to `game-graph.json` and hot-reload into a running game in
    about half a second.
+
+## Start A Stock-Map Add-on Or A New Map
+
+Choose **Mod → New Mod** in the desktop editor, or **Create New Mod** in the F9
+graph chooser.
+
+1. Choose **Native FUSE** for new work. RailLoader Legacy is available for old
+   data packages, but native-only controls are disabled in that mode.
+2. Choose **Stock-map add-on** when your package changes the existing
+   Railroader world.
+3. Choose **Standalone map** when you are building a separate world from the
+   ground up. Enter the real latitude and longitude of the southwest map origin.
+4. The standalone wizard creates `Info.json`, `map.fuse.json`, and
+   `Map/Map.json`. The native declaration suppresses the stock world only when
+   this map is launched.
+5. In the desktop editor, the new `Map` tile folder opens with the package and
+   tile generation uses its georeference automatically.
+6. When creating through F9, return to the main menu and launch the registered
+   map through FUSE before authoring its empty world. F9 cannot replace the live
+   stock-map session underneath the player.
+
+Generated, deleted, and undo-restored terrain tiles update the `tiles` list in
+`Map.json` automatically. The stock map's historical westward terrain correction
+is applied only at the stock origin and never leaks into a new map.
 
 ## First Session: Editing Terrain
 
@@ -75,6 +101,29 @@ Press **`D`** for diff mode at any point to see which tiles you have changed.
 | `V` | Vegetation — dominant biome per pixel (presets 0–7) |
 | `W` | Water — white is water, black is land |
 | `D` | Diff — tiles modified since the last save |
+
+Vegetation values are density levels, not eight fixed biomes or anonymous paint
+numbers. The examples describe common uses; the game's density rules still
+exclude plants around track, water, objects, steep slopes, and cut-tree masks.
+
+| ID | Density | Approx. mask | Typical use |
+| --- | --- | --- | --- |
+| 0 | Full | 100% | Dense forest and maximum plant placement |
+| 1 | Very Dense | 86% | Woodland or other very dense cover |
+| 2 | Dense | 71% | Trees and brush with small openings |
+| 3 | Medium | 57% | Balanced mixed vegetation and open ground |
+| 4 | Light | 43% | Grass, shrubs, and scattered trees |
+| 5 | Sparse | 29% | Mostly open grass or ground |
+| 6 | Minimal | 14% | Pasture, cropland, and lightly planted yards |
+| 7 | Clear | 0% | Built-up, bare, snow, or open-water ground |
+
+Saving is atomic and keeps a recoverable tile backup. A successful desktop save
+recalculates tile statistics and invalidates every overview/detail/scale render
+cache, even when pixels were changed by paste or generation rather than the
+brush. The in-game editor invalidates Railroader's terrain cache after a
+successful save (or rebuilds it when a new override source was mounted), so
+vegetation and water reload from the saved tile instead of reverting to a stale
+texture.
 
 `S` toggles hillshade, which adds directional lighting and is the fastest way to
 read terrain shape.

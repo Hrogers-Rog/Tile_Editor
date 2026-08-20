@@ -1,5 +1,124 @@
 # Changelog
 
+- Adds native **Fence / Wall** object-line authoring to the Spliney workspace.
+  Authors can draw and edit repeated rigid scenery modules with spacing, scale,
+  model rotation, side/height offsets, terrain snap, slope alignment, endpoint,
+  and safety-cap controls. Legacy RailLoader projects show the unsupported tool
+  disabled instead of emitting data they cannot preserve.
+- Gives all eight vegetation mask values truthful density names, approximate
+  mask strength, and practical examples instead of implying each value is a
+  fixed biome. Desktop saves now defensively recalculate tile statistics and
+  invalidate overview/detail/scale caches even after paste or generation;
+  categorical save/reload and Railroader cache invalidation remain covered so a
+  saved paint stroke cannot be silently replaced by stale editor data.
+
+## 0.26.8
+
+- Repairs the portable Signals/CTC authoring contract. New CTC documents now
+  include the required `trainOrders` array; territory membership follows
+  control-point and block creation, rename, and deletion; and saving either
+  sidecar adds Railroad Operations (`AITraffic`) to the package requirements
+  and load order. Desktop pre-publish validation now resolves every authored
+  signal, interlocking, node, segment, block, route, switch, and territory
+  reference across `train-signals.json` and `ctc-system.json`.
+
+- Adds a native **Options** workspace for modular packages. Authors can create
+  player-facing on/off, choice, and slider settings, select exact track,
+  operations, world, progression, or audio targets, edit/delete rules with
+  undo/redo, and validate references before export. The editor writes FUSE
+  `settings` plus `featureRules`, marks them reload-required, and keeps the
+  workspace visibly disabled in RailLoader mode.
+
+- Adds a native **Water** authoring workspace that distinguishes terrain water
+  masks from visible lake planes. It creates pointer-placed rectangles, edits
+  polygon points and generation settings, reuses stock lake materials/profiles,
+  and replaces base lakes through a documented suppression plus editable copy.
+  Legacy controls remain visible but disabled because RailLoader has no honest
+  lake-polygon representation. Undo/redo and desktop validation cover the new
+  `world.waterSurfaces` data.
+
+- Adds **Validate** and **Export ZIP** to the desktop Mod panel. Native FUSE
+  operations validation now covers areas, TrackSpans, loads, industries,
+  station agents, physical loaders, unique passenger IDs/codes, and reciprocal
+  neighbor links. Dependency/base-game references are warnings for add-ons but
+  errors for standalone maps that suppress the base world.
+- Completes the passenger route form with next-stop travel time, optional map
+  feature gating, and validated intermediate timetable points. Native projects
+  write `branchDefinitions`; legacy projects receive the supported `branches`
+  subset without changing the native schema.
+
+- Adds explicit **Stock-map add-on / Standalone map** creation to both the
+  desktop and F9 native-FUSE workflows. Standalone packages include a native
+  map declaration and georeferenced `Map/Map.json`; the desktop generator reads
+  that origin and keeps its tile list synchronized after generation, deletion,
+  and undo. The stock map's historical coordinate correction is confined to
+  the stock origin.
+
+- Corrects FUSE-native scenery serialization to write
+  `world.scenery.<id>.assetIdentifier`. Earlier editor output that placed native
+  scenery at the document root is migrated without discarding ID collisions.
+- Corrects base-game object output: native projects now write schema-safe
+  `world.sceneClones` IDs with explicit `targetPath` and `path://scene` sources,
+  while legacy projects retain RailLoader `mandelas`. Earlier misplaced native
+  mandelas migrate without being silently discarded.
+- Adds one-step custom Toolshed service-facility placement: installed authored
+  load-point discovery, bunker-C/wood presets, track snapping and offsets, and
+  coordinated `world.scenery` + `ToolshedServiceFacilities.json` undo/save.
+- Exposes the existing turntable builder and moves loader snap controls onto the
+  Facilities workflow where they are usable.
+- Writes native roads, rivers, and trestles to `world.splineys` with FUSE
+  `type` fields, while keeping Strange Customs `handler` records isolated to
+  RailLoader output. Earlier root-level native splineys are migrated safely.
+- Writes original-pole moves to native `world.telegraphPoleMovements` instead
+  of inserting an Alina `TelegraphPoleMover` handler into native splineys;
+  RailLoader output retains its compatible handler record.
+- Omits empty native area/segment/loader references and validates loader/station
+  prefab URIs before saving, preventing files that look authored but fail the
+  FUSE schema.
+- Makes native FUSE the recommended new-project format and labels RailLoader
+  output as a limited compatibility format. Native data remains the authority;
+  unsupported legacy-only representations are not silently invented.
+- Adds a native base-game industry removal form that writes the exact runtime ID
+  to `operations.removals.industries` without deleting unrelated track/scenery.
+- Warns when generated turnout geometry is below a 35 m estimated radius, which
+  catches the common case where nodes/segments load but Railroader cannot render
+  the switch rails.
+- Ignores `TrackMeshGenerated` geometry while selecting base-game Objects, so
+  town signs and small props beside track no longer lose the click to rail mesh.
+- Clarifies native turntable bridge-track ownership and the split between FUSE
+  scenery placement and Toolshed diesel/bunker-C service behavior.
+
+## 0.26.7
+
+- Keeps a failed desktop package creation error visible instead of replacing it
+  with a misleading success message. Invalid IDs and occupied folders now fail
+  closed all the way through the wizard.
+- Interpolates terrain brush samples between mouse events in both the desktop
+  editor and F9 editor. Fast sculpting/terraforming strokes no longer leave the
+  evenly spaced ridges, gaps, or contour-like bands visible in the reported
+  hillside.
+- Writes vegetation and water as Railroader's exact categorical mask values
+  instead of blending bytes that quantize back to the old value on save. New
+  mod-owned terrain overrides are declared and hot-mounted through FUSE when
+  possible, so a saved vegetation stroke survives reload instead of reverting.
+
+## 0.26.5
+
+- Adds **Create New Mod** to the in-game F9 graph chooser. A user can enter an
+  ID, display name, and author; choose a compatible or native FUSE package; and
+  begin editing the newly created graph without installing or running the
+  desktop editor.
+- Rebuilds the desktop **New Mod** workflow with the same explicit formats,
+  parent-folder selection, destination preview, and overwrite protection.
+- Makes the recommended package one source of truth for both loaders:
+  `Definition.json` + `game-graph.json`, loaded directly by RailLoader and
+  imported by FUSE. New manifests require only RailLoader and no longer force
+  Strange Customs or Alina's Map Mod.
+- Adds genuine native FUSE scaffolding with `Info.json`, `FuseDataFiles`, and an
+  editable `map.fuse.json` using schema version 1.0 and native removal lists.
+- Rejects invalid/reserved mod IDs and non-empty targets instead of producing a
+  broken or partially overwritten package.
+
 ## 0.26.4
 
 - Distinguishes a short stationary right-click from a held or dragged camera

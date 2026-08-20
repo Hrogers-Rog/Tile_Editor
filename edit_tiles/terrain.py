@@ -171,6 +171,13 @@ class Tile:
         finally:
             if temporary.exists():
                 temporary.unlink()
+        # Treat save as a cache boundary. Painting already invalidates these
+        # surfaces, but callers may also edit the pixel arrays directly (for
+        # example selection paste and generated-tile workflows). Recomputing
+        # the summary and dropping every derived surface here guarantees the
+        # next draw represents the bytes that were just written.
+        self._recalc_stats()
+        self.invalidate()
         self.dirty = False
         print(f"Saved tile ({self.x},{self.y}) -> {self.path}")
         return True
@@ -226,6 +233,31 @@ def brush_falloff(radius: int) -> np.ndarray:
     t = np.clip(dist / max(radius, 1), 0.0, 1.0)
     falloff = (1.0 - t) ** 3 * (1.0 + 3.0 * t + 6.0 * t ** 2)
     return falloff.astype(np.float32)
+
+
+def interpolate_stroke_points(start, end, maximum_spacing):
+    """Return evenly spaced brush samples after *start*, including *end*.
+
+    Mouse-motion events can be much farther apart than the configured brush
+    spacing when the frame rate drops or the pointer moves quickly.  Painting
+    only at those event positions leaves visible, regularly spaced ridges and
+    holes.  The starting point has already been painted, so it is deliberately
+    excluded from the returned sequence.
+    """
+    if start is None:
+        return [end]
+    x0, y0 = start
+    x1, y1 = end
+    distance = math.hypot(x1 - x0, y1 - y0)
+    spacing = max(float(maximum_spacing), 0.001)
+    sample_count = max(1, int(math.ceil(distance / spacing)))
+    return [
+        (
+            x0 + (x1 - x0) * index / sample_count,
+            y0 + (y1 - y0) * index / sample_count,
+        )
+        for index in range(1, sample_count + 1)
+    ]
 
 
 def _perlin_grid(shape, scale):

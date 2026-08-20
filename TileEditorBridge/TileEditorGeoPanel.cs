@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Reflection;
 using UnityEngine;
@@ -17,7 +18,9 @@ namespace Hrogers.TileEditorBridge
             Objects,
             Poles,
             Terrain,
+            Water,
             Operations,
+            Options,
             Desktop,
         }
 
@@ -93,6 +96,22 @@ namespace Hrogers.TileEditorBridge
         private string _newSplineWidth = "8";
         private int _newSplineHeadStyle;
         private int _newSplineTailStyle;
+        private int _objectLineSource;
+        private string _objectLineAssetIdentifier = string.Empty;
+        private string _objectLinePrefab = string.Empty;
+        private string _objectLineSpacing = "5";
+        private string _objectLineScaleX = "1";
+        private string _objectLineScaleY = "1";
+        private string _objectLineScaleZ = "1";
+        private string _objectLineRotationX = "0";
+        private string _objectLineRotationY = "0";
+        private string _objectLineRotationZ = "0";
+        private string _objectLineLateralOffset = "0";
+        private string _objectLineVerticalOffset = "0";
+        private bool _objectLineSnapToTerrain;
+        private bool _objectLineAlignToSlope;
+        private bool _objectLinePlaceAtEnd = true;
+        private string _objectLineMaximumInstances = "1024";
         private string _trackBridgeName = string.Empty;
         private string _trackBridgeBelowRail = "0.30";
         private int _trackBridgeHeadStyle;
@@ -122,6 +141,14 @@ namespace Hrogers.TileEditorBridge
         private string _selectedGraphPath = string.Empty;
         private bool _showAdvancedGraphLayers;
         private bool _showGraphChooser;
+        private bool _showNewModCreator;
+        private int _newModFormat;
+        private int _newModProjectKind;
+        private string _newModId = "YourName.NewMap";
+        private string _newModName = "New Map";
+        private string _newModAuthor = string.Empty;
+        private string _newMapOriginLatitude = "35.382614";
+        private string _newMapOriginLongitude = "-83.49541";
         private string _trackBuildGauge = "Standard";
 
         private void DrawTileEditorWindow(int id)
@@ -151,6 +178,10 @@ namespace Hrogers.TileEditorBridge
             DrawPanelTab("OBJECTS", PanelTab.Objects);
             DrawPanelTab("POLES", PanelTab.Poles);
             DrawPanelTab("TERRAIN", PanelTab.Terrain);
+            DrawPanelTab("WATER", PanelTab.Water);
+            GUILayout.EndHorizontal();
+            GUILayout.BeginHorizontal();
+            DrawPanelTab("OPTIONS", PanelTab.Options);
             DrawPanelTab("DESKTOP", PanelTab.Desktop);
             GUILayout.EndHorizontal();
 
@@ -199,8 +230,14 @@ namespace Hrogers.TileEditorBridge
                     case PanelTab.Terrain:
                         DrawTerrainPanel();
                         break;
+                    case PanelTab.Water:
+                        DrawWaterPanel();
+                        break;
                     case PanelTab.Operations:
                         DrawOperationsPanel();
+                        break;
+                    case PanelTab.Options:
+                        DrawFeatureOptionsPanel();
                         break;
                     default:
                         DrawDesktopPanel();
@@ -347,6 +384,8 @@ namespace Hrogers.TileEditorBridge
                             ? "LIVE POLES - CLICK AMBER MARKERS"
                         : _panelTab == PanelTab.Operations
                             ? "LIVE OPERATIONS - CLICK COLORED MARKERS"
+                        : _panelTab == PanelTab.Options
+                            ? "PACKAGE PLAYER OPTIONS"
                             : _geoTool == GeoTool.Spliney
                                 ? "LIVE SPLINEY - CLICK ROAD/RIVER POINTS"
                                 : "LIVE GRAPH - CLICK TRACK IN THE WORLD"
@@ -590,12 +629,31 @@ namespace Hrogers.TileEditorBridge
             }
             GUILayout.EndHorizontal();
 
+            GUI.enabled =
+                graphControlsEnabled
+                && !_mapEditor.HasUnsavedContent;
+            if (GUILayout.Button(
+                    _showNewModCreator
+                        ? "CLOSE NEW MOD CREATOR"
+                        : "CREATE NEW MOD...",
+                    GUILayout.Height(31f)))
+            {
+                _showNewModCreator = !_showNewModCreator;
+            }
+            GUI.enabled = graphControlsEnabled;
+            if (_showNewModCreator)
+            {
+                DrawNewModCreator(graphControlsEnabled);
+                if (!_showGraphChooser || _mapEditor.GraphOpen)
+                    return;
+            }
+
             var choices = _mapEditor.GraphChoices;
             if (choices.Count == 0)
             {
                 GUILayout.Label(
-                    "No installed Definition.json game-graph mixintos were "
-                    + "found. Install or create a RailLoader map mod first.",
+                    "No editable map package was found. Use Create New Mod "
+                    + "above to start a compatible or native FUSE map.",
                     _mutedStyle);
                 GUI.enabled = graphControlsEnabled;
                 return;
@@ -755,6 +813,126 @@ namespace Hrogers.TileEditorBridge
                 "The selected graph is remembered and opens automatically "
                 + "next time when the desktop editor is offline.",
                 _mutedStyle);
+        }
+
+        private void DrawNewModCreator(bool graphControlsEnabled)
+        {
+            GUILayout.Space(5f);
+            GUILayout.Label("NEW MAP MOD", _titleStyle);
+            GUILayout.Label(
+                "Creates a complete editable package directly in Railroader's "
+                + "Mods folder. Existing folders are never overwritten.",
+                _lineStyle);
+            DrawTextField("Mod ID", ref _newModId);
+            DrawTextField("Display name", ref _newModName);
+            DrawTextField("Author", ref _newModAuthor);
+            GUILayout.Label("Package format", _mutedStyle);
+            _newModFormat = GUILayout.SelectionGrid(
+                Mathf.Clamp(_newModFormat, 0, 1),
+                new[]
+                {
+                    "Native FUSE",
+                    "Legacy RL",
+                },
+                2);
+            GUILayout.Label(
+                _newModFormat == 0
+                    ? "Recommended: Info.json + map.fuse.json using FUSE's "
+                      + "complete native schema. All editor tools are available."
+                    : "Limited compatibility: Definition.json + game-graph.json. "
+                      + "FUSE can import it, but native-only operations are disabled.",
+                _mutedStyle);
+
+            if (_newModFormat == 0)
+            {
+                GUILayout.Label("Project type", _mutedStyle);
+                _newModProjectKind = GUILayout.SelectionGrid(
+                    Mathf.Clamp(_newModProjectKind, 0, 1),
+                    new[]
+                    {
+                        "Stock-map add-on",
+                        "Standalone map",
+                    },
+                    2);
+                GUILayout.Label(
+                    _newModProjectKind == 0
+                        ? "Edits the existing Railroader map and keeps the stock world."
+                        : "Creates Map/Map.json and suppresses the stock world when this map is launched.",
+                    _mutedStyle);
+                if (_newModProjectKind == 1)
+                {
+                    DrawTextField(
+                        "Origin latitude",
+                        ref _newMapOriginLatitude);
+                    DrawTextField(
+                        "Origin longitude",
+                        ref _newMapOriginLongitude);
+                    GUILayout.Label(
+                        "The desktop generator uses this georeference for elevation, land cover, and OSM alignment. "
+                        + "Launch the new map from the main menu before authoring against its empty world.",
+                        _mutedStyle);
+                }
+            }
+
+            GUI.enabled =
+                graphControlsEnabled
+                && !_mapEditor.HasUnsavedContent;
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("CREATE AND EDIT", GUILayout.Height(33f)))
+            {
+                RunGameAction(() =>
+                {
+                    var completeMap = _newModFormat == 0
+                                      && _newModProjectKind == 1;
+                    var latitude = 35.382614d;
+                    var longitude = -83.49541d;
+                    if (completeMap
+                        && (!double.TryParse(
+                                _newMapOriginLatitude,
+                                NumberStyles.Float,
+                                CultureInfo.InvariantCulture,
+                                out latitude)
+                            || !double.TryParse(
+                                _newMapOriginLongitude,
+                                NumberStyles.Float,
+                                CultureInfo.InvariantCulture,
+                                out longitude)))
+                    {
+                        throw new InvalidOperationException(
+                            "Map origin latitude and longitude must be numbers.");
+                    }
+
+                    var path = _mapEditor.CreateNewMapMod(
+                        _newModId,
+                        _newModName,
+                        _newModAuthor,
+                        _newModFormat == 0,
+                        completeMap,
+                        latitude,
+                        longitude);
+                    _mapEditor.OpenGraph(path);
+                    _showNewModCreator = false;
+                    _showGraphChooser = false;
+                    _selectedGraphModKey = Path.GetDirectoryName(path)
+                                           ?? string.Empty;
+                    _selectedGraphPath = path;
+                    _autoOpenAttemptPath = path;
+                    _preferredGraphPath = path;
+                    PlayerPrefs.SetString(
+                        LastGraphPathKey,
+                        _preferredGraphPath);
+                    PlayerPrefs.Save();
+                    return completeMap
+                        ? "Created " + _newModName
+                          + ". Launch it as a FUSE map before building its empty world."
+                        : "Created and opened " + _newModName;
+                });
+            }
+            if (GUILayout.Button("Cancel", GUILayout.Width(90f), GUILayout.Height(33f)))
+                _showNewModCreator = false;
+            GUILayout.EndHorizontal();
+            GUI.enabled = graphControlsEnabled;
+            GUILayout.Space(7f);
         }
 
         private string UnsavedGraphSelectionSummary()
@@ -990,6 +1168,15 @@ namespace Hrogers.TileEditorBridge
             GUILayout.BeginHorizontal();
             if (GUILayout.Button("Refresh Overlays", GUILayout.Height(30f)))
                 RunGameAction("Rebuilt track overlays", _mapEditor.RebuildTrack);
+            if (GUILayout.Button(
+                    _mapEditor.SegmentGradeLabelsVisible
+                        ? "Hide Grades"
+                        : "Show Grades",
+                    GUILayout.Height(30f)))
+            {
+                _mapEditor.SetSegmentGradeLabelsVisible(
+                    !_mapEditor.SegmentGradeLabelsVisible);
+            }
             GUILayout.EndHorizontal();
             DrawPointerPlacementStatus();
         }
@@ -1837,6 +2024,23 @@ namespace Hrogers.TileEditorBridge
             SyncSegmentGroupEditor(segment);
             GUILayout.Label("Track segment", _titleStyle);
             GUILayout.Label(
+                "ENDPOINT NODES",
+                _mutedStyle);
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button(
+                    "A  " + segment.StartNodeId,
+                    GUILayout.Height(28f)))
+            {
+                _mapEditor.SelectNodeById(segment.StartNodeId);
+            }
+            if (GUILayout.Button(
+                    "B  " + segment.EndNodeId,
+                    GUILayout.Height(28f)))
+            {
+                _mapEditor.SelectNodeById(segment.EndNodeId);
+            }
+            GUILayout.EndHorizontal();
+            GUILayout.Label(
                 "Segment ID / name",
                 _mutedStyle);
             _segmentIdEditorValue = GUILayout.TextField(
@@ -2065,8 +2269,19 @@ namespace Hrogers.TileEditorBridge
             GUILayout.Space(7f);
             DrawDeleteControl(null, segment);
             GUILayout.Space(5f);
+            GUILayout.BeginHorizontal();
             if (GUILayout.Button("Refresh Track Overlays", GUILayout.Height(28f)))
                 RunGameAction("Rebuilt track overlays", _mapEditor.RebuildTrack);
+            if (GUILayout.Button(
+                    _mapEditor.SegmentGradeLabelsVisible
+                        ? "Hide Grades"
+                        : "Show Grades",
+                    GUILayout.Height(28f)))
+            {
+                _mapEditor.SetSegmentGradeLabelsVisible(
+                    !_mapEditor.SegmentGradeLabelsVisible);
+            }
+            GUILayout.EndHorizontal();
         }
 
         private void SyncSegmentGroupEditor(
@@ -2378,12 +2593,16 @@ namespace Hrogers.TileEditorBridge
             if (point == null)
             {
                 _splineSelectionKey = string.Empty;
-                GUILayout.Label("Road, river, and bridge splineys", _titleStyle);
+                GUILayout.Label(
+                    "Road, river, bridge, and object-line splineys",
+                    _titleStyle);
                 GUILayout.Label(
                     _mapEditor.RoadSplineyCount + " roads   "
                     + _mapEditor.RiverSplineyCount + " rivers   "
                     + _mapEditor.TrestleSplineyCount
-                    + " bridges/trestles",
+                    + " bridges/trestles   "
+                    + _mapEditor.ObjectLineSplineyCount
+                    + " object lines",
                     _lineStyle);
                 GUILayout.Label(
                     "Click a colored control point to edit an existing spline, "
@@ -2487,7 +2706,16 @@ namespace Hrogers.TileEditorBridge
 
                 GUILayout.Space(6f);
                 GUILayout.Label("PLACE NEW SPLINEY", _titleStyle);
-                var kinds = new[] { "Road", "River", "Bridge / Trestle" };
+                var nativeSplineFormat = _mapEditor.FuseNativeDocument;
+                var kinds = nativeSplineFormat
+                    ? new[]
+                    {
+                        "Road",
+                        "River",
+                        "Bridge / Trestle",
+                        "Fence / Wall",
+                    }
+                    : new[] { "Road", "River", "Bridge / Trestle" };
                 var oldKind = _newSplineKind;
                 _newSplineKind = GUILayout.SelectionGrid(
                     Mathf.Clamp(_newSplineKind, 0, kinds.Length - 1),
@@ -2501,6 +2729,20 @@ namespace Hrogers.TileEditorBridge
                             ? "R2_Profile_River_Mountain"
                             : string.Empty;
                 }
+                if (!nativeSplineFormat)
+                {
+                    GUI.enabled = false;
+                    GUILayout.Button(
+                        "Fence / Wall (Native FUSE only)",
+                        GUILayout.Height(27f));
+                    GUI.enabled = true;
+                    GUILayout.Label(
+                        "Legacy RailLoader splineys cannot store repeated "
+                        + "objects. Create or convert the project as Native "
+                        + "FUSE to enable fences, retaining walls, guardrails, "
+                        + "and similar modular lines.",
+                        _mutedStyle);
+                }
 
                 DrawTextField(
                     "Name (optional)",
@@ -2509,7 +2751,9 @@ namespace Hrogers.TileEditorBridge
                     ? "Road"
                     : _newSplineKind == 1
                         ? "River"
-                        : "Trestle";
+                        : _newSplineKind == 2
+                            ? "Trestle"
+                            : "ObjectLine";
                 if (_newSplineKind < 2)
                 {
                     DrawTextField("Loaded profile", ref _newSplineProfile);
@@ -2533,7 +2777,7 @@ namespace Hrogers.TileEditorBridge
                     }
                     DrawTextField("Width (m)", ref _newSplineWidth);
                 }
-                else
+                else if (_newSplineKind == 2)
                 {
                     GUILayout.Label("Bridge end styles", _mutedStyle);
                     GUILayout.BeginHorizontal();
@@ -2550,6 +2794,10 @@ namespace Hrogers.TileEditorBridge
                         new[] { "Block", "Bent" },
                         2);
                     GUILayout.EndHorizontal();
+                }
+                else
+                {
+                    DrawObjectLineSettings(false);
                 }
 
                 GUILayout.Label(
@@ -2582,6 +2830,10 @@ namespace Hrogers.TileEditorBridge
                                     "Spline width must be between 0.5 and 500 m.");
                             }
                         }
+                        else if (_newSplineKind == 3)
+                        {
+                            ValidateObjectLinePanelValues();
+                        }
                         ArmPointerPlacement(
                             PointerPlacementKind.NewSpliney,
                             createKind,
@@ -2603,20 +2855,50 @@ namespace Hrogers.TileEditorBridge
                 {
                     RunGameAction("Placed new " + createKind + " spliney", () =>
                     {
-                        _mapEditor.CreateSplineyAtCamera(
-                            _newSplineName,
-                            createKind,
-                            _newSplineProfile,
-                            ParseFloat(
-                                _newSplineLength,
-                                "new spline length"),
-                            _newSplineKind < 2
-                                ? ParseFloat(
-                                    _newSplineWidth,
-                                    "new spline width")
-                                : 0f,
-                            _newSplineHeadStyle == 0 ? "Block" : "Bent",
-                            _newSplineTailStyle == 0 ? "Block" : "Bent");
+                        if (_newSplineKind == 3)
+                        {
+                            _mapEditor.CreateObjectLineAtCamera(
+                                _newSplineName,
+                                SelectedObjectLineAssetIdentifier(),
+                                SelectedObjectLinePrefab(),
+                                ParseFloat(
+                                    _newSplineLength,
+                                    "new object-line length"),
+                                ParseFloat(
+                                    _objectLineSpacing,
+                                    "object spacing"),
+                                ParseObjectLineScale(),
+                                ParseObjectLineRotation(),
+                                ParseFloat(
+                                    _objectLineLateralOffset,
+                                    "lateral offset"),
+                                ParseFloat(
+                                    _objectLineVerticalOffset,
+                                    "vertical offset"),
+                                _objectLineSnapToTerrain,
+                                _objectLineAlignToSlope,
+                                _objectLinePlaceAtEnd,
+                                ParseInt(
+                                    _objectLineMaximumInstances,
+                                    "maximum instances"));
+                        }
+                        else
+                        {
+                            _mapEditor.CreateSplineyAtCamera(
+                                _newSplineName,
+                                createKind,
+                                _newSplineProfile,
+                                ParseFloat(
+                                    _newSplineLength,
+                                    "new spline length"),
+                                _newSplineKind < 2
+                                    ? ParseFloat(
+                                        _newSplineWidth,
+                                        "new spline width")
+                                    : 0f,
+                                _newSplineHeadStyle == 0 ? "Block" : "Bent",
+                                _newSplineTailStyle == 0 ? "Block" : "Bent");
+                        }
                         _newSplineName = string.Empty;
                     });
                 }
@@ -2685,7 +2967,13 @@ namespace Hrogers.TileEditorBridge
 
             DrawPrimarySplineMoveControls();
             GUILayout.Space(5f);
-            DrawPrimarySplineRotationControls(point);
+            if (!point.IsObjectLine)
+                DrawPrimarySplineRotationControls(point);
+            else
+                GUILayout.Label(
+                    "Object modules follow the path tangent. Use Rotation "
+                    + "offset below to turn the repeated model itself.",
+                    _mutedStyle);
 
             GUILayout.Space(5f);
             if (point.HasWidth)
@@ -2710,7 +2998,7 @@ namespace Hrogers.TileEditorBridge
                             point.Width + 1f));
                 GUILayout.EndHorizontal();
             }
-            else
+            else if (!point.IsObjectLine)
             {
                 GUILayout.Label(
                     "BRIDGE ENDS   Start " + point.HeadStyle
@@ -2738,6 +3026,37 @@ namespace Hrogers.TileEditorBridge
                             ToggleEndStyle(point.TailStyle)));
                 }
                 GUILayout.EndHorizontal();
+            }
+            else
+            {
+                DrawObjectLineSettings(true);
+                if (GUILayout.Button(
+                        "APPLY OBJECT-LINE SETTINGS",
+                        GUILayout.Height(32f)))
+                {
+                    RunSplineAction(
+                        "Updated repeated-object line",
+                        () => _mapEditor.SetSelectedObjectLineSettings(
+                            SelectedObjectLineAssetIdentifier(),
+                            SelectedObjectLinePrefab(),
+                            ParseFloat(
+                                _objectLineSpacing,
+                                "object spacing"),
+                            ParseObjectLineScale(),
+                            ParseObjectLineRotation(),
+                            ParseFloat(
+                                _objectLineLateralOffset,
+                                "lateral offset"),
+                            ParseFloat(
+                                _objectLineVerticalOffset,
+                                "vertical offset"),
+                            _objectLineSnapToTerrain,
+                            _objectLineAlignToSlope,
+                            _objectLinePlaceAtEnd,
+                            ParseInt(
+                                _objectLineMaximumInstances,
+                                "maximum instances")));
+                }
             }
 
             GUILayout.BeginHorizontal();
@@ -2824,11 +3143,14 @@ namespace Hrogers.TileEditorBridge
                 ref _splinePositionX,
                 ref _splinePositionY,
                 ref _splinePositionZ);
-            DrawVectorFields(
-                "Rotation",
-                ref _splineRotationX,
-                ref _splineRotationY,
-                ref _splineRotationZ);
+            if (!point.IsObjectLine)
+            {
+                DrawVectorFields(
+                    "Rotation",
+                    ref _splineRotationX,
+                    ref _splineRotationY,
+                    ref _splineRotationZ);
+            }
             if (point.HasWidth)
                 DrawTextField("Width (m)", ref _splineWidth);
             if (GUILayout.Button("Apply Exact Spline Point", GUILayout.Height(31f)))
@@ -2840,10 +3162,18 @@ namespace Hrogers.TileEditorBridge
                             ParseFloat(_splinePositionX, "spline position X"),
                             ParseFloat(_splinePositionY, "spline position Y"),
                             ParseFloat(_splinePositionZ, "spline position Z")),
-                        new Vector3(
-                            ParseFloat(_splineRotationX, "spline rotation X"),
-                            ParseFloat(_splineRotationY, "spline rotation Y"),
-                            ParseFloat(_splineRotationZ, "spline rotation Z")),
+                        point.IsObjectLine
+                            ? point.Rotation
+                            : new Vector3(
+                                ParseFloat(
+                                    _splineRotationX,
+                                    "spline rotation X"),
+                                ParseFloat(
+                                    _splineRotationY,
+                                    "spline rotation Y"),
+                                ParseFloat(
+                                    _splineRotationZ,
+                                    "spline rotation Z")),
                         point.HasWidth
                             ? ParseFloat(_splineWidth, "spline width")
                             : 0f));
@@ -2868,6 +3198,135 @@ namespace Hrogers.TileEditorBridge
                 _newSplineProfile = profile;
             }
             GUI.backgroundColor = oldColor;
+        }
+
+        private void DrawObjectLineSettings(bool editingExisting)
+        {
+            GUILayout.Label(
+                editingExisting
+                    ? "REPEATED OBJECT SETTINGS"
+                    : "Repeated object source",
+                editingExisting ? _titleStyle : _mutedStyle);
+            _objectLineSource = GUILayout.SelectionGrid(
+                Mathf.Clamp(_objectLineSource, 0, 1),
+                new[] { "Asset identifier", "Scene prefab path" },
+                2);
+            if (_objectLineSource == 0)
+            {
+                DrawTextField(
+                    "Loaded asset ID",
+                    ref _objectLineAssetIdentifier);
+                GUILayout.Label(
+                    "Recommended. Enter a FUSE/AssetLoader scenery asset "
+                    + "identifier; each module is resolved through the shared "
+                    + "asset registry.",
+                    _mutedStyle);
+            }
+            else
+            {
+                DrawTextField(
+                    "Safe scene prefab path",
+                    ref _objectLinePrefab);
+                GUILayout.Label(
+                    "Advanced: clone an existing scene object by its full "
+                    + "hierarchy path. Prefer asset identifiers for portable mods.",
+                    _mutedStyle);
+            }
+            DrawTextField("Spacing (m)", ref _objectLineSpacing);
+            DrawVectorFields(
+                "Scale",
+                ref _objectLineScaleX,
+                ref _objectLineScaleY,
+                ref _objectLineScaleZ);
+            DrawVectorFields(
+                "Model rotation offset",
+                ref _objectLineRotationX,
+                ref _objectLineRotationY,
+                ref _objectLineRotationZ);
+            DrawTextField(
+                "Side offset (m)",
+                ref _objectLineLateralOffset);
+            DrawTextField(
+                "Height offset (m)",
+                ref _objectLineVerticalOffset);
+            _objectLineSnapToTerrain = GUILayout.Toggle(
+                _objectLineSnapToTerrain,
+                "Snap each module to terrain");
+            _objectLineAlignToSlope = GUILayout.Toggle(
+                _objectLineAlignToSlope,
+                "Follow vertical slope");
+            _objectLinePlaceAtEnd = GUILayout.Toggle(
+                _objectLinePlaceAtEnd,
+                "Always place a final module at the endpoint");
+            DrawTextField(
+                "Safety limit (instances)",
+                ref _objectLineMaximumInstances);
+            GUILayout.Label(
+                "Use this for rigid repeating modules such as fence panels, "
+                + "posts, retaining-wall sections, guardrails, or pipe. The "
+                + "objects stay rigid; the path controls spacing and heading.",
+                _mutedStyle);
+        }
+
+        private string SelectedObjectLineAssetIdentifier()
+        {
+            return _objectLineSource == 0
+                ? _objectLineAssetIdentifier
+                : string.Empty;
+        }
+
+        private string SelectedObjectLinePrefab()
+        {
+            return _objectLineSource == 1
+                ? _objectLinePrefab
+                : string.Empty;
+        }
+
+        private Vector3 ParseObjectLineScale()
+        {
+            return new Vector3(
+                ParseFloat(_objectLineScaleX, "object scale X"),
+                ParseFloat(_objectLineScaleY, "object scale Y"),
+                ParseFloat(_objectLineScaleZ, "object scale Z"));
+        }
+
+        private Vector3 ParseObjectLineRotation()
+        {
+            return new Vector3(
+                ParseFloat(_objectLineRotationX, "object rotation X"),
+                ParseFloat(_objectLineRotationY, "object rotation Y"),
+                ParseFloat(_objectLineRotationZ, "object rotation Z"));
+        }
+
+        private void ValidateObjectLinePanelValues()
+        {
+            if (string.IsNullOrWhiteSpace(
+                    SelectedObjectLineAssetIdentifier())
+                && string.IsNullOrWhiteSpace(SelectedObjectLinePrefab()))
+            {
+                throw new InvalidOperationException(
+                    "Enter the loaded asset identifier or scene prefab path "
+                    + "for the repeated object.");
+            }
+            var spacing = ParseFloat(
+                _objectLineSpacing,
+                "object spacing");
+            if (spacing <= 0f)
+                throw new InvalidOperationException(
+                    "Object spacing must be greater than zero.");
+            var scale = ParseObjectLineScale();
+            if (scale.x <= 0f || scale.y <= 0f || scale.z <= 0f)
+                throw new InvalidOperationException(
+                    "Object scale must be greater than zero on every axis.");
+            var maximum = ParseInt(
+                _objectLineMaximumInstances,
+                "maximum instances");
+            if (maximum < 1 || maximum > 4096)
+                throw new InvalidOperationException(
+                    "Maximum instances must be between 1 and 4096.");
+            ParseObjectLineRotation();
+            ParseFloat(_objectLineLateralOffset, "lateral offset");
+            ParseFloat(_objectLineVerticalOffset, "vertical offset");
         }
 
         private void DrawPrimarySplineMoveControls()
@@ -3121,6 +3580,35 @@ namespace Hrogers.TileEditorBridge
             _splineRotationY = FormatTransformValue(point.Rotation.y);
             _splineRotationZ = FormatTransformValue(point.Rotation.z);
             _splineWidth = FormatTransformValue(point.Width);
+            if (point.IsObjectLine)
+            {
+                _objectLineSource = string.IsNullOrWhiteSpace(
+                    point.AssetIdentifier) ? 1 : 0;
+                _objectLineAssetIdentifier = point.AssetIdentifier;
+                _objectLinePrefab = point.Prefab;
+                _objectLineSpacing = FormatTransformValue(point.Spacing);
+                _objectLineScaleX =
+                    FormatTransformValue(point.InstanceScale.x);
+                _objectLineScaleY =
+                    FormatTransformValue(point.InstanceScale.y);
+                _objectLineScaleZ =
+                    FormatTransformValue(point.InstanceScale.z);
+                _objectLineRotationX =
+                    FormatTransformValue(point.RotationOffset.x);
+                _objectLineRotationY =
+                    FormatTransformValue(point.RotationOffset.y);
+                _objectLineRotationZ =
+                    FormatTransformValue(point.RotationOffset.z);
+                _objectLineLateralOffset =
+                    FormatTransformValue(point.LateralOffset);
+                _objectLineVerticalOffset =
+                    FormatTransformValue(point.VerticalOffset);
+                _objectLineSnapToTerrain = point.SnapToTerrain;
+                _objectLineAlignToSlope = point.AlignToSlope;
+                _objectLinePlaceAtEnd = point.PlaceAtEnd;
+                _objectLineMaximumInstances = point.MaximumInstances.ToString(
+                    CultureInfo.InvariantCulture);
+            }
         }
 
         private void DrawPiecesTool()
@@ -3186,6 +3674,23 @@ namespace Hrogers.TileEditorBridge
                 DrawTextField("Divergence (degrees)", ref _turnoutDegrees);
                 DrawTextField("Target grade (%)", ref _targetGrade);
                 DrawDirectionButtons();
+                if (TryDescribeTurnoutGeometry(
+                        _turnoutLength,
+                        _turnoutDegrees,
+                        out var pieceGeometry,
+                        out var pieceTooTight))
+                {
+                    GUILayout.Label(
+                        pieceGeometry,
+                        pieceTooTight ? _offlineStyle : _mutedStyle);
+                    if (pieceTooTight)
+                    {
+                        GUILayout.Label(
+                            "TRACK MAY NOT RENDER - use a longer lead or "
+                            + "smaller divergence.",
+                            _offlineStyle);
+                    }
+                }
                 GUI.enabled = node != null;
                 if (GUILayout.Button("Add Turnout Piece", GUILayout.Height(34f)))
                 {
@@ -3392,6 +3897,25 @@ namespace Hrogers.TileEditorBridge
             DrawTextField("Target grade (%)", ref _targetGrade);
             DrawDirectionButtons();
 
+            var turnoutGeometryValid = TryDescribeTurnoutGeometry(
+                _turnoutLength,
+                _turnoutDegrees,
+                out var turnoutGeometry,
+                out var turnoutTooTight);
+            if (turnoutGeometryValid)
+            {
+                GUILayout.Label(
+                    turnoutGeometry,
+                    turnoutTooTight ? _offlineStyle : _mutedStyle);
+                if (turnoutTooTight)
+                {
+                    GUILayout.Label(
+                        "TRACK MAY NOT RENDER - increase the lead length or "
+                        + "reduce the divergence angle before building.",
+                        _offlineStyle);
+                }
+            }
+
             GUI.enabled = node != null;
             if (GUILayout.Button("Build Turnout Branch", GUILayout.Height(34f)))
             {
@@ -3410,6 +3934,43 @@ namespace Hrogers.TileEditorBridge
                 "After building, select the new magenta endpoint and continue with "
                 + "Grade, Arc, or Track tools.",
                 _mutedStyle);
+        }
+
+        private static bool TryDescribeTurnoutGeometry(
+            string lengthText,
+            string angleText,
+            out string description,
+            out bool tooTight)
+        {
+            description = string.Empty;
+            tooTight = false;
+            if (!float.TryParse(
+                    lengthText,
+                    NumberStyles.Float,
+                    CultureInfo.InvariantCulture,
+                    out var leadLength)
+                || !float.TryParse(
+                    angleText,
+                    NumberStyles.Float,
+                    CultureInfo.InvariantCulture,
+                    out var degrees)
+                || leadLength <= 0f
+                || degrees <= 0f)
+            {
+                return false;
+            }
+
+            var radius = leadLength / (degrees * Mathf.Deg2Rad);
+            tooTight = radius < 35f;
+            description = "Estimated branch radius: "
+                          + radius.ToString(
+                              "0.0",
+                              CultureInfo.InvariantCulture)
+                          + " m"
+                          + (tooTight
+                              ? " (below the editor's 35 m tight-curve warning)"
+                              : string.Empty);
+            return true;
         }
 
         private void DrawWyeTool()
