@@ -141,6 +141,7 @@ namespace Hrogers.TileEditorBridge
         private bool _savedCursorVisible;
         private bool _cursorCaptured;
         private TileEditorGraphSession _mapEditor;
+        private TileEditorBridgeFileWriter _heartbeatWriter;
 
         internal void Initialize(UnityModManager.ModEntry.ModLogger logger)
         {
@@ -152,6 +153,8 @@ namespace Hrogers.TileEditorBridge
             _commandPath = Path.Combine(_bridgeDirectory, "editor_commands.json");
             _gamePanelStatePath = Path.Combine(
                 _bridgeDirectory, "game_panel_state.json");
+            _heartbeatWriter = new TileEditorBridgeFileWriter(
+                _gamePanelStatePath);
             _bridgeCommandPath = Path.Combine(
                 _bridgeDirectory, "bridge_commands.json");
             _bridgeCommandAckPath = Path.Combine(
@@ -489,6 +492,10 @@ namespace Hrogers.TileEditorBridge
         {
             try
             {
+                var writeError = _heartbeatWriter?.TakeLastError();
+                if (!string.IsNullOrWhiteSpace(writeError))
+                    _logger?.Warning(
+                        "Could not write game_panel_state.json: " + writeError);
                 var state = new GamePanelState
                 {
                     protocolVersion = 1,
@@ -507,7 +514,7 @@ namespace Hrogers.TileEditorBridge
                     graphPath = _mapEditor?.GraphPath
                                 ?? string.Empty,
                 };
-                AtomicWrite(_gamePanelStatePath, JsonUtility.ToJson(state));
+                _heartbeatWriter?.QueueLatest(JsonUtility.ToJson(state));
             }
             catch (Exception ex)
             {
@@ -709,6 +716,8 @@ namespace Hrogers.TileEditorBridge
             SetGameInputLock(false);
             _mapEditor?.Dispose();
             _mapEditor = null;
+            _heartbeatWriter?.Dispose();
+            _heartbeatWriter = null;
             if (_windowBackgroundTexture != null)
                 Destroy(_windowBackgroundTexture);
             if (_windowBorderTexture != null)

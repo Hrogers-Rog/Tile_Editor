@@ -16437,12 +16437,30 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
     # ------------------------------------------------------------------
     # Main loop
     # ------------------------------------------------------------------
+    def _target_frame_rate(self, had_event=False):
+        """Keep editing fluid without redrawing an unchanged whole map at 60 Hz."""
+        if not pygame.display.get_active():
+            return 5
+        interactive = had_event or self.status_timer > 0 or self.gen_active
+        if not interactive:
+            interactive = any((
+                self.painting,
+                self.dragging,
+                self.dragging_node,
+                self.dragging_spliney_pt,
+                self.sel_dragging,
+                self.gen_dragging_grid,
+                self.tile_delete_dragging,
+            ))
+        return 60 if interactive else 15
+
     def run(self):
         clock   = pygame.time.Clock()
         running = True
         frame = 0
         while running:
-            for event in pygame.event.get():
+            events = pygame.event.get()
+            for event in events:
                 result = self.handle_event(event)
                 if not result:
                     print(f"[run] handle_event returned False on event: {event}", flush=True)
@@ -16451,7 +16469,7 @@ class TileEditor(DrawMixin, EventsMixin, BridgeMixin):
             if frame == 1:
                 print(f"[run] first frame drawn OK, screen={self.screen.get_size()}", flush=True)
             self.draw()
-            dt = clock.tick(60) / 1000.0   # seconds this frame
+            dt = clock.tick(self._target_frame_rate(bool(events))) / 1000.0
 
             # Bridge state poll (thread-safe handoff)
             self._poll_bridge()

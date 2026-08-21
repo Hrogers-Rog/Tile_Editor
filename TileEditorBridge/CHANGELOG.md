@@ -1,5 +1,12 @@
 # Changelog
 
+- Reduces low-end-system editor contention without lowering active editing
+  responsiveness. The desktop whole-map view now idles at 15 FPS (5 FPS while
+  minimized) and returns to 60 FPS for input, painting, dragging, generation,
+  and status feedback.
+- Replaces one grade-label `LateUpdate` and `Camera.main` lookup per track
+  segment with one shared 20 Hz billboard pass, and coalesces in-game bridge
+  heartbeat writes through a single background file writer.
 - Adds native **Fence / Wall** object-line authoring to the Spliney workspace.
   Authors can draw and edit repeated rigid scenery modules with spacing, scale,
   model rotation, side/height offsets, terrain snap, slope alignment, endpoint,

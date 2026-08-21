@@ -913,6 +913,9 @@ class PackageVersionTests(unittest.TestCase):
         scenery_source = (
             bridge / "TileEditorScenerySession.cs"
         ).read_text(encoding="utf-8")
+        overlay_source = (
+            bridge / "TileEditorOverlays.cs"
+        ).read_text(encoding="utf-8")
         self.assertIn(
             "_nextDynamicOverlayRefreshAt",
             graph_source,
@@ -925,6 +928,34 @@ class PackageVersionTests(unittest.TestCase):
             "_sceneryOverlaySignature",
             scenery_source,
         )
+        self.assertEqual(
+            1,
+            overlay_source.count("private void LateUpdate()"),
+            "grade labels must share one billboard callback",
+        )
+        self.assertIn(
+            "TileEditorGradeLabelBillboards.Refresh(Camera.main)",
+            overlay_source,
+        )
+
+    def test_bridge_heartbeat_file_io_is_coalesced_off_main_thread(self):
+        root = Path(__file__).resolve().parent.parent
+        bridge = root / "TileEditorBridge"
+        panel_source = (
+            bridge / "TileEditorBridgePanel.cs"
+        ).read_text(encoding="utf-8")
+        writer_source = (
+            bridge / "TileEditorBridgeFileWriter.cs"
+        ).read_text(encoding="utf-8")
+
+        heartbeat = panel_source.split(
+            "private void WriteGamePanelHeartbeat()", 1
+        )[1].split("private void ReadBridgeCommand()", 1)[0]
+        self.assertIn("_heartbeatWriter?.QueueLatest", heartbeat)
+        self.assertNotIn("AtomicWrite(", heartbeat)
+        self.assertIn("ThreadPool.QueueUserWorkItem", writer_source)
+        self.assertIn("_pendingContents = contents", writer_source)
+        self.assertIn("_workerRunning", writer_source)
 
     def test_in_game_spliney_supports_creation_and_auto_trestles(self):
         root = Path(__file__).resolve().parent.parent
@@ -2976,6 +3007,24 @@ class NativeServiceFacilityContractTests(unittest.TestCase):
         self.assertIn("_baseLakeOriginalActiveStates", session)
         self.assertIn("IsScenePathSuppressedByFuse", session)
         self.assertIn("SyncEditorHiddenBaseLakes(current)", session)
+
+    def test_desktop_editor_throttles_unchanged_whole_map_redraws(self):
+        root = Path(__file__).resolve().parent.parent
+        source = (root / "edit_tiles" / "app.py").read_text(encoding="utf-8")
+
+        frame_rate = source.split(
+            "def _target_frame_rate(self, had_event=False):", 1
+        )[1].split("def run(self):", 1)[0]
+        run_loop = source.split("def run(self):", 1)[1].split(
+            "# =========================", 1
+        )[0]
+
+        self.assertIn("return 5", frame_rate)
+        self.assertIn("return 60 if interactive else 15", frame_rate)
+        self.assertIn("self.painting", frame_rate)
+        self.assertIn("self.dragging_node", frame_rate)
+        self.assertIn("self.gen_active", frame_rate)
+        self.assertIn("clock.tick(self._target_frame_rate(bool(events)))", run_loop)
 
 
 if __name__ == "__main__":

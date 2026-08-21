@@ -1,5 +1,13 @@
 # Getting Started
 
+## Performance While Railroader Is Running
+
+The desktop editor keeps active painting, dragging, generation, and other input
+at 60 FPS. When the whole-map view is unchanged it drops to 15 FPS, or 5 FPS
+while minimized, so an editor left open on a second monitor does not compete as
+aggressively with Railroader's main game thread. The in-game bridge also
+coalesces heartbeat writes instead of queuing one disk write per update.
+
 The Tile Editor is a desktop application for building Railroader maps: terrain
 tiles, track graphs, roads and rivers, scenery, operations, signals, and
 crossings. It pairs with an in-game F9 workspace that edits the same data live.

@@ -68,6 +68,11 @@ stock-map add-on from a standalone map. A standalone project creates the native
 map declaration plus `Map/Map.json`; terrain generation then uses that map's own
 latitude, longitude, and tile size rather than the stock North Carolina origin.
 
+The desktop view reduces unchanged whole-map redraws automatically: active
+editing remains 60 FPS, an idle window uses 15 FPS, and a minimized window uses
+5 FPS. The in-game bridge coalesces heartbeat file writes, so leaving the editor
+open beside Railroader does not create an unbounded I/O queue.
+
 Narrow and dual-gauge rail geometry is rendered by
 [FUSE Narrow Gauge](https://github.com/Hrogers-Rog/Narrow_Gauge), not by
 Railroader's standard track builder.
