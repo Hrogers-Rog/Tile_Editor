@@ -1,5 +1,20 @@
 # Changelog
 
+- Adds an opt-in deferred track preview to the F9 Geo workspace. Node and
+  segment edits update the yellow guide geometry immediately without repeatedly
+  rebuilding Railroader track meshes, switch geometry, or dual-gauge topology.
+  **Apply Track** batches the accumulated neighborhood into one runtime rebuild;
+  disabling the option safely applies any pending work first. Existing live
+  rebuild behavior remains the default.
+- Makes local-axis node movement use the node's full rotation, so forward/back
+  movement follows its pitch and grade instead of remaining at one elevation.
+- Adds in-game smoothing for an ordered chain of existing track nodes. It reads
+  current entry/exit grades, holds both endpoint elevations, solves one cubic
+  vertical curve, updates elevation and signed pitch together, previews through
+  deferred yellow guides, and blocks disconnected chains, junctions, duplicate
+  nodes, and solutions that exceed the editor's grade safety limit.
+- Refreshes only scenery overlays touched by an edit instead of rescanning and
+  refreshing every scenery marker after each object movement.
 - Reduces low-end-system editor contention without lowering active editing
   responsiveness. The desktop whole-map view now idles at 15 FPS (5 FPS while
   minimized) and returns to 60 FPS for input, painting, dragging, generation,

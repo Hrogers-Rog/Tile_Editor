@@ -20,11 +20,32 @@ in roughly 500 ms.
 The two-click drag is deliberate: one click selects, a second starts the move, so
 you cannot nudge a node by accident while inspecting it.
 
+## Deferred Track Preview
+
+Large maps can make Railroader pause while it rebuilds rails, ballast, switches,
+and gauge topology after every edit. In **F9 → Geo**, enable **Preview track
+edits as yellow guides; rebuild on Apply** to batch that work.
+
+While enabled:
+
+- node and segment data, undo/redo history, and yellow guide geometry update
+  immediately;
+- existing rendered track remains in its last applied position;
+- Railroader track meshes and Narrow Gauge topology are not rebuilt after each
+  change; and
+- the top button changes to **Apply Track (N)** when work is pending.
+
+Press **Apply Track** when you need to inspect or operate on the finished rails.
+Switching live rebuilds back on also applies pending work first. The setting is
+remembered, but it is off by default so the established live-rebuild workflow is
+unchanged.
+
 ## Node Properties
 
 | Control | What it does |
 | --- | --- |
 | X / Y / Z | Direct position editing — click, type, Enter |
+| Local move | Uses the node's full rotation; forward/back follows pitch/grade |
 | RotY nudge | Fine grid: ±90 / 45 / 30 / 15 / 10 / 5 / 1 / 0.1 / 0.05 / 0.001° |
 | Flatten | Zeros rotX and rotZ, levelling the node on terrain |
 | Reverse | Flips heading 180° |
@@ -36,6 +57,14 @@ you cannot nudge a node by accident while inspecting it.
 Paste Y is the tool for levelling a run: copy from a node at the right elevation,
 then paste height onto each node along the tangent without disturbing plan
 position.
+
+For an existing route, open **Geo → Grade → Smooth existing track** and add at
+least three connected nodes in travel order. **Read Current End Grades** measures
+the first and last segment, or enter the desired entry and exit grades yourself.
+**Smooth Existing Grade Chain** keeps both endpoint elevations fixed and solves a
+continuous vertical curve through every intermediate node, updating elevation
+and pitch together as one undoable operation. Switches, disconnected/duplicate
+nodes, zero-length runs, and curves exceeding the grade safety limit are blocked.
 
 The connected-segments list at the bottom of the node panel is clickable.
 

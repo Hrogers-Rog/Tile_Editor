@@ -93,6 +93,8 @@ namespace Hrogers.TileEditorBridge
             "Hrogers.TileEditorBridge.LastGraphPath";
         private const string TrackBuildGaugeKey =
             "Hrogers.TileEditorBridge.TrackBuildGauge";
+        private const string DeferredTrackRebuildsKey =
+            "Hrogers.TileEditorBridge.DeferredTrackRebuilds";
         private const string NodeIdPrefixKey =
             "Hrogers.TileEditorBridge.NodeIdPrefix";
         private const string NodeIdBaseNameKey =
@@ -162,6 +164,10 @@ namespace Hrogers.TileEditorBridge
             Directory.CreateDirectory(_bridgeDirectory);
             InitializeTrackToolProfiles();
             _mapEditor = new TileEditorGraphSession(_logger, gameRoot);
+            _mapEditor.SetDeferredTrackRebuilds(
+                PlayerPrefs.GetInt(
+                    DeferredTrackRebuildsKey,
+                    0) != 0);
             InitializeOsmOverlay(gameRoot);
             _trackBuildGauge = PlayerPrefs.GetString(
                 TrackBuildGaugeKey,

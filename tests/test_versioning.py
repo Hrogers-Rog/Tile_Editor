@@ -1929,6 +1929,82 @@ class PackageVersionTests(unittest.TestCase):
             graph_source,
         )
 
+    def test_deferred_track_preview_keeps_live_rebuild_as_default(self):
+        root = Path(__file__).resolve().parent.parent
+        bridge = root / "TileEditorBridge"
+        panel_source = (
+            bridge / "TileEditorGeoPanel.cs"
+        ).read_text(encoding="utf-8")
+        graph_source = (
+            bridge / "TileEditorGraphSession.cs"
+        ).read_text(encoding="utf-8")
+        gauge_source = (
+            bridge / "TileEditorGaugeSession.cs"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("private bool _deferredTrackRebuilds;", graph_source)
+        self.assertIn(
+            "var previewOnly = _deferredTrackRebuilds",
+            graph_source,
+        )
+        self.assertIn("trackManager != null && !previewOnly", graph_source)
+        self.assertIn("forceRuntimeTrackRebuild: true", graph_source)
+        self.assertIn("RequestNarrowGaugeSynchronization();", graph_source)
+        self.assertIn(
+            "(_deferredTrackRebuilds && TrackRebuildPending)",
+            gauge_source,
+        )
+        self.assertIn(
+            "Preview track edits as yellow guides; rebuild on Apply",
+            panel_source,
+        )
+        self.assertIn("DeferredTrackRebuildsKey,\n                    0", (
+            bridge / "TileEditorBridgePanel.cs"
+        ).read_text(encoding="utf-8"))
+
+    def test_local_node_movement_respects_pitch_and_roll(self):
+        root = Path(__file__).resolve().parent.parent
+        graph_source = (
+            root / "TileEditorBridge" / "TileEditorGraphSession.cs"
+        ).read_text(encoding="utf-8")
+        move_method = graph_source.split(
+            "internal void MoveSelectedNode", 1
+        )[1].split("internal void RotateSelectedNode", 1)[0]
+
+        self.assertIn(
+            "Quaternion.Euler(\n                            "
+            "node.transform.localEulerAngles) * offset",
+            move_method,
+        )
+        self.assertNotIn(
+            "0f, node.transform.localEulerAngles.y, 0f",
+            move_method,
+        )
+
+    def test_in_game_grade_chain_holds_endpoints_and_blocks_junctions(self):
+        root = Path(__file__).resolve().parent.parent
+        bridge = root / "TileEditorBridge"
+        graph_source = (
+            bridge / "TileEditorGraphSession.cs"
+        ).read_text(encoding="utf-8")
+        panel_source = (
+            bridge / "TileEditorGeoPanel.cs"
+        ).read_text(encoding="utf-8")
+        method = graph_source.split(
+            "internal string SmoothExistingGradeChain", 1
+        )[1].split("internal string BuildArc", 1)[0]
+
+        self.assertIn("HermiteElevation(", method)
+        self.assertIn("HermiteGrade(", method)
+        self.assertIn("PitchForChainNode(", method)
+        self.assertIn("var startY = nodes[0]", method)
+        self.assertIn("var endY = nodes[nodes.Length - 1]", method)
+        self.assertIn("SegmentsConnectedTo(node).Count() > 2", method)
+        self.assertIn("maxGrade > 15.0001f", method)
+        self.assertIn("useTargetedTrackRebuild: true", method)
+        self.assertIn('"Read Current End Grades"', panel_source)
+        self.assertIn('"Smooth Existing Grade Chain"', panel_source)
+
     def test_gauge_metadata_survives_legacy_and_fuse_segment_edits(self):
         from mod_project.layer import Layer
 

@@ -56,6 +56,8 @@ namespace Hrogers.TileEditorBridge
         private string _gradeLength = "100";
         private string _targetGrade = "0.0";
         private string _gradeSteps = "8";
+        private string _gradeChainStartGrade = "0.0";
+        private string _gradeChainEndGrade = "0.0";
         private string _arcRadius = "60";
         private string _arcDegrees = "30";
         private string _arcNodes = "3";
@@ -77,6 +79,8 @@ namespace Hrogers.TileEditorBridge
         private string _parallelTracks = "1";
         private int _parallelSide = 1;
         private readonly List<string> _fitArcNodeIds = new List<string>();
+        private readonly List<string> _gradeChainNodeIds =
+            new List<string>();
         private string _splinePositionX = "0";
         private string _splinePositionY = "0";
         private string _splinePositionZ = "0";
@@ -464,7 +468,11 @@ namespace Hrogers.TileEditorBridge
             }
             GUI.enabled = rebuildEnabled;
             if (GUILayout.Button(
-                    "Rebuild Track",
+                    _mapEditor.TrackRebuildPending
+                        ? "Apply Track ("
+                          + _mapEditor.DeferredTrackChangeCount
+                          + ")"
+                        : "Rebuild Track",
                     GUILayout.Height(28f)))
             {
                 RunGameAction(
@@ -473,6 +481,36 @@ namespace Hrogers.TileEditorBridge
             }
             GUI.enabled = rebuildEnabled;
             GUILayout.EndHorizontal();
+            var deferredTrackRebuilds = GUILayout.Toggle(
+                _mapEditor.DeferredTrackRebuilds,
+                " Preview track edits as yellow guides; rebuild on Apply");
+            if (deferredTrackRebuilds
+                != _mapEditor.DeferredTrackRebuilds)
+            {
+                RunGameAction(
+                    deferredTrackRebuilds
+                        ? "Deferred track preview enabled"
+                        : "Live track rebuilds enabled",
+                    () =>
+                    {
+                        _mapEditor.SetDeferredTrackRebuilds(
+                            deferredTrackRebuilds);
+                        PlayerPrefs.SetInt(
+                            DeferredTrackRebuildsKey,
+                            deferredTrackRebuilds ? 1 : 0);
+                        PlayerPrefs.Save();
+                    });
+            }
+            if (_mapEditor.DeferredTrackRebuilds)
+            {
+                GUILayout.Label(
+                    _mapEditor.TrackRebuildPending
+                        ? "Yellow guides show pending geometry. Press Apply Track "
+                          + "when you want Railroader to rebuild it."
+                        : "Track preview is deferred. Your next edits will update "
+                          + "yellow guides without rebuilding game track.",
+                    _mutedStyle);
+            }
             DrawWorldSelection();
             GUILayout.Space(6f);
             GUILayout.BeginHorizontal();
@@ -3847,6 +3885,93 @@ namespace Hrogers.TileEditorBridge
             GUILayout.Label(
                 "Use 6-12 sections for long crest/sag transitions. Undo removes the "
                 + "entire generated transition as one operation.",
+                _mutedStyle);
+
+            GUILayout.Space(10f);
+            GUILayout.Label("Smooth existing track", _titleStyle);
+            GUILayout.Label(
+                "Build an ordered node chain in travel direction. The solver keeps "
+                + "both endpoint elevations fixed, then adjusts intermediate "
+                + "elevations and pitch into one continuous vertical curve.",
+                _lineStyle);
+            GUILayout.BeginHorizontal();
+            GUI.enabled = node != null
+                          && !_gradeChainNodeIds.Contains(node.Id);
+            if (GUILayout.Button("Add Selected", GUILayout.Height(29f)))
+                _gradeChainNodeIds.Add(node.Id);
+            GUI.enabled = _gradeChainNodeIds.Count > 0;
+            if (GUILayout.Button("Undo Node", GUILayout.Height(29f)))
+            {
+                _gradeChainNodeIds.RemoveAt(
+                    _gradeChainNodeIds.Count - 1);
+            }
+            if (GUILayout.Button("Clear", GUILayout.Height(29f)))
+                _gradeChainNodeIds.Clear();
+            GUI.enabled = true;
+            GUILayout.EndHorizontal();
+            GUILayout.Label(
+                "Chain: " + _gradeChainNodeIds.Count + " node"
+                + (_gradeChainNodeIds.Count == 1 ? string.Empty : "s"),
+                _mutedStyle);
+            var chainStart = Mathf.Max(
+                0,
+                _gradeChainNodeIds.Count - 6);
+            for (var index = chainStart;
+                 index < _gradeChainNodeIds.Count;
+                 index++)
+            {
+                GUILayout.Label(
+                    (index + 1) + ". "
+                    + Shorten(_gradeChainNodeIds[index], 42),
+                    _mutedStyle);
+            }
+
+            GUI.enabled = _gradeChainNodeIds.Count >= 2;
+            if (GUILayout.Button(
+                    "Read Current End Grades",
+                    GUILayout.Height(29f)))
+            {
+                RunGameAction("Read grade-chain endpoints", () =>
+                {
+                    _mapEditor.ReadGradeChainEndpointGrades(
+                        _gradeChainNodeIds,
+                        out var startGrade,
+                        out var endGrade);
+                    _gradeChainStartGrade = startGrade.ToString(
+                        "0.###",
+                        CultureInfo.InvariantCulture);
+                    _gradeChainEndGrade = endGrade.ToString(
+                        "0.###",
+                        CultureInfo.InvariantCulture);
+                });
+            }
+            GUI.enabled = true;
+            DrawTextField(
+                "Entry grade in chain direction (%)",
+                ref _gradeChainStartGrade);
+            DrawTextField(
+                "Exit grade in chain direction (%)",
+                ref _gradeChainEndGrade);
+            GUI.enabled = _gradeChainNodeIds.Count >= 3;
+            if (GUILayout.Button(
+                    "Smooth Existing Grade Chain",
+                    GUILayout.Height(34f)))
+            {
+                RunGameAction(() =>
+                    _mapEditor.SmoothExistingGradeChain(
+                        _gradeChainNodeIds,
+                        ParseFloat(
+                            _gradeChainStartGrade,
+                            "entry grade"),
+                        ParseFloat(
+                            _gradeChainEndGrade,
+                            "exit grade")));
+            }
+            GUI.enabled = true;
+            GUILayout.Label(
+                "Use at least three connected, non-switch nodes. Endpoint heights "
+                + "do not move; disconnected chains, duplicate nodes, and junctions "
+                + "are blocked. The entire curve is one undo operation.",
                 _mutedStyle);
         }
 

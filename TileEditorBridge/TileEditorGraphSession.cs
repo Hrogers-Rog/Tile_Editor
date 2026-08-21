@@ -141,6 +141,10 @@ namespace Hrogers.TileEditorBridge
             new HashSet<string>();
         private readonly HashSet<string> _pendingSegmentGeometryRefresh =
             new HashSet<string>();
+        private readonly HashSet<string> _deferredTrackNodeIds =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private readonly HashSet<string> _deferredTrackSegmentIds =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, TileEditorSegmentOverlay>
             _segmentOverlays =
                 new Dictionary<string, TileEditorSegmentOverlay>(
@@ -159,6 +163,8 @@ namespace Hrogers.TileEditorBridge
         private int _trackOverlayRepairPasses;
         private float _nextTrackOverlayRepairAt;
         private float _nextSegmentGeometryRefreshAt;
+        private bool _deferredTrackRebuilds;
+        private bool _deferredFullTrackRebuildPending;
         private bool _dirty;
         private bool _choicesLoaded;
         private bool _externalGraphEditLock;
@@ -250,6 +256,24 @@ namespace Hrogers.TileEditorBridge
             : Path.GetFileName(_graphPath);
         internal bool SegmentGradeLabelsVisible =>
             _segmentGradeLabelsVisible;
+        internal bool DeferredTrackRebuilds =>
+            _deferredTrackRebuilds;
+        internal bool TrackRebuildPending =>
+            _deferredFullTrackRebuildPending
+            || _deferredTrackNodeIds.Count > 0
+            || _deferredTrackSegmentIds.Count > 0;
+        internal int DeferredTrackChangeCount =>
+            _deferredTrackNodeIds.Count
+            + _deferredTrackSegmentIds.Count;
+
+        internal void SetDeferredTrackRebuilds(bool deferred)
+        {
+            if (_deferredTrackRebuilds == deferred)
+                return;
+            if (!deferred && TrackRebuildPending)
+                RebuildTrack();
+            _deferredTrackRebuilds = deferred;
+        }
 
         internal void SetSegmentGradeLabelsVisible(bool visible)
         {
@@ -624,6 +648,8 @@ namespace Hrogers.TileEditorBridge
             if (_graph == null)
                 throw new InvalidOperationException(
                     "Railroader's live track graph is not ready yet.");
+            if (TrackRebuildPending)
+                RebuildTrack();
 
             var text = File.ReadAllText(path);
             var document = JObject.Parse(text);
@@ -1164,7 +1190,7 @@ namespace Hrogers.TileEditorBridge
                 {
                     var appliedOffset = localAxes
                         ? Quaternion.Euler(
-                            0f, node.transform.localEulerAngles.y, 0f) * offset
+                            node.transform.localEulerAngles) * offset
                         : offset;
                     node.transform.localPosition += appliedOffset;
                 });
@@ -1743,10 +1769,20 @@ namespace Hrogers.TileEditorBridge
         internal void RebuildTrack()
         {
             RequireSession();
+            var nodeIds = _deferredTrackNodeIds.ToArray();
+            var segmentIds = _deferredTrackSegmentIds.ToArray();
+            var targeted = !_deferredFullTrackRebuildPending
+                           && (nodeIds.Length > 0
+                               || segmentIds.Length > 0);
             RebuildLiveGraph(
-                Array.Empty<string>(),
-                Array.Empty<string>(),
-                rebuildAllOverlays: true);
+                nodeIds,
+                segmentIds,
+                rebuildAllOverlays: true,
+                useTargetedTrackRebuild: targeted,
+                forceRuntimeTrackRebuild: true);
+            if (_narrowGaugeFullSyncPending)
+                RequestNarrowGaugeSynchronization();
+            ClearDeferredTrackRebuildState();
         }
 
         internal float SelectedNodeGrade()
@@ -2071,6 +2107,274 @@ namespace Hrogers.TileEditorBridge
                     new Vector3(PitchFromGrade(endGrade), yaw, 0f)));
             }
             return CommitPath(start.id, points);
+        }
+
+        internal void ReadGradeChainEndpointGrades(
+            IList<string> orderedNodeIds,
+            out float startGrade,
+            out float endGrade)
+        {
+            var nodes = ResolveGradeChain(
+                orderedNodeIds,
+                2);
+            startGrade = GradeBetween(
+                nodes[0],
+                nodes[1]);
+            endGrade = GradeBetween(
+                nodes[nodes.Length - 2],
+                nodes[nodes.Length - 1]);
+        }
+
+        internal string SmoothExistingGradeChain(
+            IList<string> orderedNodeIds,
+            float startGrade,
+            float endGrade)
+        {
+            RequireSession();
+            ValidateGrade(startGrade);
+            ValidateGrade(endGrade);
+            var nodes = ResolveGradeChain(
+                orderedNodeIds,
+                3);
+            var stations = new float[nodes.Length];
+            for (var index = 1; index < nodes.Length; index++)
+            {
+                var delta = nodes[index].transform.localPosition
+                            - nodes[index - 1].transform.localPosition;
+                var run = Mathf.Sqrt(
+                    delta.x * delta.x + delta.z * delta.z);
+                if (run < 0.05f)
+                {
+                    throw new InvalidOperationException(
+                        "Grade-chain nodes "
+                        + nodes[index - 1].id + " and "
+                        + nodes[index].id
+                        + " have no usable horizontal separation.");
+                }
+                stations[index] = stations[index - 1] + run;
+            }
+
+            var length = stations[stations.Length - 1];
+            var startY = nodes[0].transform.localPosition.y;
+            var endY = nodes[nodes.Length - 1]
+                .transform.localPosition.y;
+            var startSlope = startGrade / 100f;
+            var endSlope = endGrade / 100f;
+            var maxGrade = 0f;
+            for (var sample = 0; sample <= 64; sample++)
+            {
+                var t = sample / 64f;
+                maxGrade = Mathf.Max(
+                    maxGrade,
+                    Mathf.Abs(HermiteGrade(
+                        t,
+                        length,
+                        startY,
+                        endY,
+                        startSlope,
+                        endSlope)));
+            }
+            if (maxGrade > 15.0001f)
+            {
+                throw new InvalidOperationException(
+                    "That endpoint height and grade combination creates up to "
+                    + maxGrade.ToString(
+                        "0.00",
+                        CultureInfo.InvariantCulture)
+                    + "% inside the curve. Lengthen the chain, reduce the end "
+                    + "grade difference, or adjust an endpoint elevation.");
+            }
+
+            var nodeIds = nodes.Select(node => node.id).ToArray();
+            var segmentIds = nodes
+                .SelectMany(node => _graph.SegmentsConnectedTo(node))
+                .Where(segment => segment != null)
+                .Select(segment => segment.id)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            ExecuteEdit(
+                "Smooth existing grade chain",
+                nodeIds,
+                segmentIds,
+                () =>
+                {
+                    for (var index = 0;
+                         index < nodes.Length;
+                         index++)
+                    {
+                        var t = stations[index] / length;
+                        var node = nodes[index];
+                        var position = node.transform.localPosition;
+                        var rotation = node.transform.localEulerAngles;
+                        position.y = HermiteElevation(
+                            t,
+                            length,
+                            startY,
+                            endY,
+                            startSlope,
+                            endSlope);
+                        rotation.x = PitchForChainNode(
+                            nodes,
+                            index,
+                            HermiteGrade(
+                                t,
+                                length,
+                                startY,
+                                endY,
+                                startSlope,
+                                endSlope));
+                        node.transform.localPosition = position;
+                        node.transform.localEulerAngles = rotation;
+                        _graph.OnNodeDidChange(node);
+                        WriteNode(node);
+                    }
+                    _selectedNode = nodes[nodes.Length - 1];
+                    _selectedSegment = null;
+                },
+                useTargetedTrackRebuild: true);
+            return "Smoothed " + nodes.Length
+                   + " nodes over "
+                   + length.ToString(
+                       "0.0",
+                       CultureInfo.InvariantCulture)
+                   + " m; maximum grade "
+                   + maxGrade.ToString(
+                       "0.00",
+                       CultureInfo.InvariantCulture)
+                   + "%";
+        }
+
+        private TrackNode[] ResolveGradeChain(
+            IList<string> orderedNodeIds,
+            int minimumCount)
+        {
+            if (orderedNodeIds == null
+                || orderedNodeIds.Count < minimumCount)
+            {
+                throw new InvalidOperationException(
+                    "The grade chain needs at least "
+                    + minimumCount + " nodes.");
+            }
+            var ids = orderedNodeIds
+                .Select(id => (id ?? string.Empty).Trim())
+                .ToArray();
+            if (ids.Any(string.IsNullOrWhiteSpace)
+                || ids.Distinct(StringComparer.OrdinalIgnoreCase).Count()
+                   != ids.Length)
+            {
+                throw new InvalidOperationException(
+                    "The grade chain contains an empty or duplicate node.");
+            }
+            var nodes = ids
+                .Select(id => _graph.GetNode(id))
+                .ToArray();
+            if (nodes.Any(node => node == null))
+            {
+                throw new InvalidOperationException(
+                    "One or more grade-chain nodes no longer exist.");
+            }
+            foreach (var node in nodes)
+            {
+                if (_graph.SegmentsConnectedTo(node).Count() > 2)
+                {
+                    throw new InvalidOperationException(
+                        "Grade smoothing cannot reshape switch or junction node '"
+                        + node.id + "'.");
+                }
+            }
+            for (var index = 1; index < nodes.Length; index++)
+            {
+                var previous = nodes[index - 1];
+                var current = nodes[index];
+                if (!_graph.Segments.Any(segment =>
+                        (segment.a == previous && segment.b == current)
+                        || (segment.a == current
+                            && segment.b == previous)))
+                {
+                    throw new InvalidOperationException(
+                        "Grade-chain nodes must be directly connected in travel "
+                        + "order. '" + previous.id + "' is not connected to '"
+                        + current.id + "'.");
+                }
+            }
+            return nodes;
+        }
+
+        private static float GradeBetween(
+            TrackNode start,
+            TrackNode end)
+        {
+            var delta = end.transform.localPosition
+                        - start.transform.localPosition;
+            var run = Mathf.Sqrt(
+                delta.x * delta.x + delta.z * delta.z);
+            if (run < 0.05f)
+            {
+                throw new InvalidOperationException(
+                    "The grade-chain endpoint segment has no usable horizontal "
+                    + "length.");
+            }
+            return delta.y / run * 100f;
+        }
+
+        private static float HermiteElevation(
+            float t,
+            float length,
+            float startY,
+            float endY,
+            float startSlope,
+            float endSlope)
+        {
+            var t2 = t * t;
+            var t3 = t2 * t;
+            return (2f * t3 - 3f * t2 + 1f) * startY
+                   + (t3 - 2f * t2 + t) * length * startSlope
+                   + (-2f * t3 + 3f * t2) * endY
+                   + (t3 - t2) * length * endSlope;
+        }
+
+        private static float HermiteGrade(
+            float t,
+            float length,
+            float startY,
+            float endY,
+            float startSlope,
+            float endSlope)
+        {
+            var t2 = t * t;
+            var elevationDerivative =
+                (6f * t2 - 6f * t) * startY
+                + (3f * t2 - 4f * t + 1f)
+                * length * startSlope
+                + (-6f * t2 + 6f * t) * endY
+                + (3f * t2 - 2f * t)
+                * length * endSlope;
+            return elevationDerivative / length * 100f;
+        }
+
+        private static float PitchForChainNode(
+            IReadOnlyList<TrackNode> nodes,
+            int index,
+            float gradeInChainDirection)
+        {
+            var first = index == 0
+                ? nodes[0]
+                : nodes[index - 1];
+            var last = index == nodes.Count - 1
+                ? nodes[nodes.Count - 1]
+                : nodes[index + 1];
+            var direction = last.transform.localPosition
+                            - first.transform.localPosition;
+            direction.y = 0f;
+            var forward = HorizontalForward(
+                nodes[index].transform.localEulerAngles.y);
+            var orientation = Vector3.Dot(
+                forward,
+                direction) < 0f
+                ? -1f
+                : 1f;
+            return PitchFromGrade(
+                gradeInChainDirection * orientation);
         }
 
         internal string BuildArc(
@@ -3100,7 +3404,8 @@ namespace Hrogers.TileEditorBridge
             IEnumerable<string> affectedSegmentIds = null,
             bool rebuildAllOverlays = false,
             bool useTargetedTrackRebuild = false,
-            bool nodeTransformOnly = false)
+            bool nodeTransformOnly = false,
+            bool forceRuntimeTrackRebuild = false)
         {
             if (_graph == null)
                 return;
@@ -3128,7 +3433,18 @@ namespace Hrogers.TileEditorBridge
             }
             foreach (var segmentId in segmentsToRefresh)
                 _graph.GetSegment(segmentId)?.InvalidateCurve();
-            if (trackManager != null)
+            var previewOnly = _deferredTrackRebuilds
+                              && !forceRuntimeTrackRebuild;
+            if (previewOnly)
+            {
+                foreach (var nodeId in nodeIds)
+                    _deferredTrackNodeIds.Add(nodeId);
+                foreach (var segmentId in segmentsToRefresh)
+                    _deferredTrackSegmentIds.Add(segmentId);
+                if (!useTargetedTrackRebuild)
+                    _deferredFullTrackRebuildPending = true;
+            }
+            if (trackManager != null && !previewOnly)
             {
                 if (useTargetedTrackRebuild)
                 {
@@ -3176,7 +3492,7 @@ namespace Hrogers.TileEditorBridge
                     var overlay = segment == null
                         ? null
                         : GetSegmentOverlay(segment);
-                    if (useTargetedTrackRebuild)
+                    if (useTargetedTrackRebuild || previewOnly)
                     {
                         overlay?.RefreshCurveLine();
                         _pendingSegmentGeometryRefresh.Add(segmentId);
@@ -3186,7 +3502,7 @@ namespace Hrogers.TileEditorBridge
                         overlay?.Rebuild();
                     }
                 }
-                if (useTargetedTrackRebuild
+                if ((useTargetedTrackRebuild || previewOnly)
                     && _pendingSegmentGeometryRefresh.Count > 0)
                 {
                     _nextSegmentGeometryRefreshAt =
@@ -3206,6 +3522,13 @@ namespace Hrogers.TileEditorBridge
                 rebuildAllOverlays);
             if (_trainSignalMode)
                 RefreshLockedTrainSignalOverlayTransforms();
+        }
+
+        private void ClearDeferredTrackRebuildState()
+        {
+            _deferredTrackNodeIds.Clear();
+            _deferredTrackSegmentIds.Clear();
+            _deferredFullTrackRebuildPending = false;
         }
 
         private IEnumerable<TrackNode> TrackRebuildNeighborhood(
@@ -3580,6 +3903,7 @@ namespace Hrogers.TileEditorBridge
             _pendingNodeOverlayRepairs.Clear();
             _pendingSegmentOverlayRepairs.Clear();
             _pendingSegmentGeometryRefresh.Clear();
+            ClearDeferredTrackRebuildState();
             _selectedNode = null;
             _selectedSegment = null;
         }

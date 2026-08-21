@@ -479,8 +479,7 @@ namespace Hrogers.TileEditorBridge
             };
 
             mutation();
-            RebuildSceneryOverlays(false);
-            SetSceneryOverlaysVisible(_editModeActive && _sceneryMode);
+            RefreshSceneryOverlays(ids);
             edit.AfterNodes = new Dictionary<string, NodeModel>();
             edit.AfterSegments = new Dictionary<string, SegmentModel>();
             edit.AfterScenery = CaptureScenery(ids);
@@ -494,6 +493,40 @@ namespace Hrogers.TileEditorBridge
             _undo.Push(edit);
             _redo.Clear();
             _dirty = true;
+        }
+
+        private void RefreshSceneryOverlays(
+            IEnumerable<string> sceneryIds)
+        {
+            foreach (var id in sceneryIds
+                         ?? Array.Empty<string>())
+            {
+                var scenery = FindLiveScenery(id, true);
+                if (scenery == null
+                    || !scenery.gameObject.activeInHierarchy)
+                {
+                    continue;
+                }
+                var overlay = scenery.GetComponentInChildren<
+                    TileEditorSceneryOverlay>(true);
+                if (overlay == null)
+                {
+                    var go = new GameObject(
+                        "TileEditorSceneryOverlay");
+                    go.transform.SetParent(
+                        scenery.transform,
+                        false);
+                    overlay = go.AddComponent<
+                        TileEditorSceneryOverlay>();
+                    overlay.Initialize(this, scenery);
+                }
+                else
+                {
+                    overlay.Refresh();
+                }
+                overlay.SetOverlayVisible(
+                    _editModeActive && _sceneryMode);
+            }
         }
 
         private void RestoreSceneryModels(EditRecord edit, bool after)
