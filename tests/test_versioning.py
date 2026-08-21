@@ -100,6 +100,9 @@ class PackageVersionTests(unittest.TestCase):
         desktop_source = (root / "edit_tiles" / "version.py").read_text(
             encoding="utf-8"
         )
+        launcher_source = (bridge / "Launch Tile Editor.bat").read_text(
+            encoding="utf-8"
+        )
         project = ET.parse(
             bridge / "Hrogers.TileEditorBridge.csproj"
         ).getroot()
@@ -117,6 +120,7 @@ class PackageVersionTests(unittest.TestCase):
             re.search(r'__version__ = "([^"]+)"', desktop_source).group(1),
             expected,
         )
+        self.assertIn(f"Hrogers Tile Editor Suite {expected}", launcher_source)
 
     def test_desktop_dirty_terrain_count_is_thread_safe(self):
         root = Path(__file__).resolve().parent.parent

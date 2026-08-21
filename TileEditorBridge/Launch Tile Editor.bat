@@ -1,7 +1,7 @@
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
 cd /d "%~dp0"
-title Hrogers Tile Editor Suite 0.26.7
+title Hrogers Tile Editor Suite 0.26.8
 
 set "EDITOR_DIR=%~dp0TileEditor"
 set "PORTABLE_EXE=%EDITOR_DIR%\PortableRuntime\TileEditor.exe"
@@ -14,7 +14,7 @@ if exist "%INSTALLED_GAME_DIR%\Railroader_Data" if exist "%INSTALLED_GAME_DIR%\M
 )
 
 echo ============================================================
-echo   Hrogers Tile Editor Suite 0.26.7
+echo   Hrogers Tile Editor Suite 0.26.8
 echo ============================================================
 echo.
 
