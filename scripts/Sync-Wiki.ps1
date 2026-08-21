@@ -33,17 +33,19 @@ $blobBase = 'https://github.com/Hrogers-Rog/Tile_Editor/blob/main'
 # docs/ file -> wiki page name. Order drives the sidebar.
 $pageMap = [ordered]@{
     'GETTING_STARTED.md'  = 'Getting-Started'
+    'FEATURE_INDEX.md'    = 'Feature-And-Workspace-Index'
     'KEYBINDS.md'         = 'Keybind-Reference'
     'TERRAIN_EDITING.md'  = 'Terrain-Editing'
     'TRACK_EDITING.md'    = 'Track-Editing'
     'MOD_TOOLS.md'        = 'Mod-Tools'
     'IN_GAME_GEO.md'      = 'In-Game-Geo-Workspace'
+    'OPERATIONS_AND_SIGNALS.md' = 'Operations-And-Signals'
     'SCHEMA_EXAMPLES.md'  = 'Data-Formats-And-Examples'
 }
 
 $sections = [ordered]@{
-    'Start here' = @('Getting-Started', 'Keybind-Reference')
-    'Editing'    = @('Terrain-Editing', 'Track-Editing', 'Mod-Tools', 'In-Game-Geo-Workspace')
+    'Start here' = @('Getting-Started', 'Feature-And-Workspace-Index', 'Keybind-Reference')
+    'Editing'    = @('Terrain-Editing', 'Track-Editing', 'Mod-Tools', 'In-Game-Geo-Workspace', 'Operations-And-Signals')
     'Data'       = @('Data-Formats-And-Examples')
 }
 
@@ -117,6 +119,7 @@ in-game **F9** workspace that edits the same data live.
 ## Start here
 
 - [Getting Started](Getting-Started) - install, run, first session
+- [Feature And Workspace Index](Feature-And-Workspace-Index) - find the right tool for a task
 - [Keybind Reference](Keybind-Reference) - every keyboard and mouse binding
 
 ## Editing
@@ -125,6 +128,7 @@ in-game **F9** workspace that edits the same data live.
 - [Track Editing](Track-Editing) - nodes, segments, connecting, gauge, geometry tools
 - [Mod Tools](Mod-Tools) - layers, progression, areas, scenery, spans, calculators
 - [In-Game Geo Workspace](In-Game-Geo-Workspace) - the F9 editor, signals, two-way sync
+- [Operations And Signals](Operations-And-Signals) - industries, loaders, passenger service, semaphores
 
 ## Data
 

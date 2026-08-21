@@ -13,9 +13,89 @@ JSON inside your map mod.
 | `game-graph.json` | RailLoader / FUSE | Track nodes and segments |
 | `grade-crossings.json` | `Hrogers.CrossingRuntime` | Functional grade crossings |
 | `train-signals.json` | Railroad Operations `Hrogers.SignalRuntime` | Semaphore signals and interlockings |
+| `ToolshedServiceFacilities.json` | Toolshed | Bind FUSE scenery to working fuel/water/wood service behavior |
 | `tile-editor-telegraph-poles.json` | Tile Editor bridge | Pole nodes and wire edges |
 | `Map.json` | Tile Editor | Georeference for the tile set |
 | `Definition.json` | RailLoader | Mod manifest (version 8) |
+
+## Standalone Native Map
+
+The native data fragment declares the playable map:
+
+```json
+{
+  "$schema": "../FUSE/schemas/fuse-mod.schema.json",
+  "schemaVersion": "1.0",
+  "id": "Author.NewRailroad",
+  "name": "New Railroad",
+  "map": {
+    "displayName": "New Railroad",
+    "mapFolder": "Map",
+    "suppressBaseWorld": true
+  },
+  "tracks": {
+    "nodes": {},
+    "segments": {},
+    "spans": {}
+  }
+}
+```
+
+`Map/Map.json` owns the terrain georeference and current tile inventory:
+
+```json
+{
+  "origin": {
+    "latitude": 35.382614,
+    "longitude": -83.49541
+  },
+  "tileDimension": 500.0,
+  "tiles": []
+}
+```
+
+The origin is the southwest map reference used for generation and overlays.
+Do not copy the example coordinates unless that is the real location of the new
+map. The editor maintains `tiles` when it generates, deletes, or restores tile
+files. A stock-map add-on omits the `map` declaration and continues to use the
+active Railroader world.
+
+## Player-Selectable Mod Sections
+
+Native FUSE packages can keep several layouts in one file and let the player
+choose what is active. This example adds an optional yard segment and its span:
+
+```json
+{
+  "settings": {
+    "enableExtraYard": {
+      "type": "bool",
+      "label": "Extra Yard Track",
+      "scope": "profile",
+      "default": true,
+      "reloadRequired": true
+    }
+  },
+  "featureRules": {
+    "extraYard": {
+      "setting": "enableExtraYard",
+      "operator": "equals",
+      "value": true,
+      "targets": {
+        "trackNodes": ["yard:n:extra"],
+        "trackSegments": ["yard:s:extra"],
+        "trackSpans": ["yard:span:extra"]
+      }
+    }
+  }
+}
+```
+
+The Options workspace builds this without hand-editing JSON. Choice options use
+an exact string value. Sliders also support `greaterThan`,
+`greaterThanOrEqual`, `lessThan`, and `lessThanOrEqual`. Changes apply on map
+reload. RailLoader output does not support `featureRules` and leaves these
+controls disabled.
 
 ## Grade Crossings
 
@@ -78,7 +158,10 @@ better than deleting it while you test.
 
 `train-signals.json` places Railroader's own animated semaphore assemblies. It is
 loaded during ordinary gameplay by Railroad Operations — players do not install
-the Tile Editor.
+the Tile Editor. The first Signals/CTC save adds `AITraffic` to the map
+manifest automatically. The authoritative `train-signals.schema.json` and
+`ctc-system.schema.json` files ship with Railroad Operations; **Validate** also
+checks their graph and cross-file references.
 
 ### A single mast
 
@@ -97,13 +180,14 @@ the Tile Editor.
       "protectedSegmentId": "SMainWest",
       "direction": "forward"
     }
-  ]
+  ],
+  "interlockings": []
 }
 ```
 
-`headCount` accepts one, two, or three heads. `initialAspect` is one of `clear`,
-`restricting`, or `stop`. `direction` is `forward` or `reverse` relative to the
-protected segment.
+`headCount` accepts one, two, or three heads. `initialAspect` is one of `stop`,
+`approach`, `clear`, `diverging-approach`, `diverging-clear`, or `restricting`.
+`direction` is `forward` or `reverse` relative to the protected segment.
 
 ### Locking a mast to the track
 
@@ -143,7 +227,7 @@ four independently adjustable masts — `A1`, `A2`, `B1`, `B2`:
   "formatVersion": 1,
   "interlockings": [
     {
-      "interlockingId": "dia-hollow-junction",
+      "id": "dia-hollow-junction",
       "type": "diamond",
       "automatic": true,
       "crossingPoint": { "x": 980.0, "y": 244.5, "z": 1502.0 },
@@ -191,8 +275,9 @@ diamond mutually exclusive.
 
 New poles and wire edges persist in the owning map mod's
 `tile-editor-telegraph-poles.json`. Original base-game poles instead save
-cumulative Alina `TelegraphPoleMover` offsets plus portable rotation overrides, so
-both kinds coexist.
+cumulative movement offsets plus portable rotation overrides, so both kinds
+coexist. Native FUSE projects use `world.telegraphPoleMovements`; RailLoader
+projects use the Alina `TelegraphPoleMover` representation.
 
 ```json
 {
@@ -251,6 +336,74 @@ Native FUSE packages are editable directly. The desktop and F9 selectors read
 `Info.json`'s `FuseDataFiles`, and `.fuse.json` track fragments keep
 `startNodeId` / `endNodeId`, native removal lists, and unrelated FUSE operations
 rather than being rewritten as legacy JSON.
+
+Native scenery belongs under `world.scenery` and uses `assetIdentifier`:
+
+```json
+{
+  "world": {
+    "scenery": {
+      "example:scenery:bunker-c": {
+        "assetIdentifier": "scenery://ALW_Loader_TankLoader",
+        "position": { "x": 100.0, "y": 20.0, "z": 300.0 },
+        "rotation": { "x": 0.0, "y": 90.0, "z": 0.0 },
+        "scale": { "x": 1.0, "y": 1.0, "z": 1.0 }
+      }
+    }
+  }
+}
+```
+
+Base-game object moves and safe clones belong under `world.sceneClones`. The
+dictionary key is a FUSE ID; it is not the slash-delimited Unity path. The path
+is stored explicitly in `targetPath`:
+
+```json
+{
+  "world": {
+    "sceneClones": {
+      "scene-V29ybGQvV2hpdHRpZXIvVG93blNpZ24": {
+        "targetPath": "World/Whittier/TownSign",
+        "source": "path://scene/World/BaseSigns/TownSign",
+        "enabled": true,
+        "localPosition": { "x": 10.0, "y": 2.0, "z": 30.0 },
+        "localRotation": { "x": 0.0, "y": 90.0, "z": 0.0 },
+        "localScale": { "x": 1.0, "y": 1.0, "z": 1.0 }
+      }
+    }
+  }
+}
+```
+
+Do not put native scene edits in a root-level `mandelas` object. The editor
+migrates that older invalid native output on access. RailLoader output mode
+continues to use root-level `mandelas` and `instantiateFrom`.
+
+The matching custom service binding is a sibling file at the mod root:
+
+```json
+{
+  "facilities": [
+    {
+      "id": "example:facility:bunker-c",
+      "targetObjectName": "example:scenery:bunker-c",
+      "modelIdentifier": "ALW_Loader_TankLoader",
+      "loadPointId": "FuelLoaderFill",
+      "serviceLoadId": "bunker-c",
+      "sourceIndustryId": "example:industry:engine-service",
+      "serviceTrackSpanId": "example:span:bunker-c-delivery",
+      "requireAuthoredLoadPoints": true,
+      "debugLogging": false
+    }
+  ]
+}
+```
+
+Do not put native scenery in a root-level `scenery` object or write
+`modelIdentifier` in place of `assetIdentifier`. The editor migrates files made
+by earlier native-output builds into `world.scenery`; if IDs collide with
+different content, it preserves the older entry under a deterministic
+`.migrated` ID instead of dropping it.
 
 Use RailLoader `Definition.json` (manifest version 8) for portable content, and
 native FUSE fragments when the legacy schema cannot express what you need.

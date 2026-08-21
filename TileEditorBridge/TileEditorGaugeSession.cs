@@ -638,6 +638,7 @@ namespace Hrogers.TileEditorBridge
         private void FlushPendingNarrowGaugeSynchronization()
         {
             if (!_narrowGaugeFullSyncPending
+                || (_deferredTrackRebuilds && TrackRebuildPending)
                 || Time.unscaledTime < _narrowGaugeFullSyncAt)
             {
                 return;

@@ -186,8 +186,28 @@ confusion:
 The bottom bar reports the current action and errors. `↩ N` shows how many mod
 undo steps are available.
 
+## In-Game F9 Workspace
+
+Most F9 authoring actions are labelled buttons rather than hidden hotkeys. The
+global/contextual inputs are:
+
+| Input | Action |
+| --- | --- |
+| `F9` | Open or close the in-game Tile Editor |
+| `Esc` | Cancel pointer placement, terrain stroke, or the active in-game action |
+| `[` / `]` | Decrease / increase the in-game terrain brush radius |
+| `Alt` + pointer/camera input | Temporarily give the game camera priority while editing |
+| `Shift+/` | Show the in-game survey/measurement HUD |
+| World click while a placement button is armed | Place/select the requested node, object, town, loader, or signal |
+
+Signals and Operations deliberately expose save, refresh, snap, lock, undo, and
+redo controls in their panels so authors do not have to memorize another set of
+single-letter bindings.
+
 ## Related
 
 - [Terrain Editing](TERRAIN_EDITING.md)
 - [Track Editing](TRACK_EDITING.md)
+- [Feature And Workspace Index](FEATURE_INDEX.md)
+- [Operations And Signals](OPERATIONS_AND_SIGNALS.md)
 - [Getting Started](GETTING_STARTED.md)

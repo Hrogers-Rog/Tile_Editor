@@ -31,8 +31,24 @@ VEG_COLORS = [
     (220, 200, 140),
 ]
 VEG_NAMES = [
-    "Dense Forest", "Woody Wetland", "Mixed Forest", "Sparse Undergrowth",
-    "Grassland+Bush", "Open Grassland", "Pasture", "Crops/Developed",
+    "Full (Dense Forest)",
+    "Very Dense (Woodland)",
+    "Dense (Trees + Brush)",
+    "Medium (Mixed Cover)",
+    "Light (Grass + Shrubs)",
+    "Sparse (Open Ground)",
+    "Minimal (Pasture / Crops)",
+    "Clear (Developed / Bare)",
+]
+VEG_DESCRIPTIONS = [
+    "100% mask; maximum tree and plant placement",
+    "~86% mask; very dense vegetation such as woodland",
+    "~71% mask; dense trees and brush with small openings",
+    "~57% mask; balanced mixed vegetation and open ground",
+    "~43% mask; lighter grass, shrubs, and scattered trees",
+    "~29% mask; sparse vegetation over mostly open ground",
+    "~14% mask; minimal vegetation for pasture or cropland",
+    "0% mask; cleared, built-up, bare, snow, or open water",
 ]
 
 WIN_W, WIN_H = 1440, 900

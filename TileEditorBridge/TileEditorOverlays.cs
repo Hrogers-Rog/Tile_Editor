@@ -144,6 +144,7 @@ namespace Hrogers.TileEditorBridge
         private TileEditorGraphSession _session;
         private TrackSegment _segment;
         private LineRenderer _line;
+        private TextMesh _gradeLabel;
 
         public float MaxPickDistance => 500f;
         public int Priority => -1;
@@ -209,6 +210,7 @@ namespace Hrogers.TileEditorBridge
             var points = SampleCurvePoints();
             _line.positionCount = points.Length;
             _line.SetPositions(points);
+            RefreshGradeLabel();
             RefreshColor();
         }
 
@@ -262,6 +264,7 @@ namespace Hrogers.TileEditorBridge
             }
             if (visible)
                 RefreshColor();
+            RefreshGradeLabel();
         }
 
         public void Activate(PickableActivateEvent evt)
@@ -294,6 +297,32 @@ namespace Hrogers.TileEditorBridge
             }
         }
 
+        internal void RefreshGradeLabel()
+        {
+            if (_gradeLabel == null
+                || _session == null
+                || _segment == null)
+            {
+                return;
+            }
+            var show = gameObject.activeInHierarchy
+                       && _session.SegmentGradeLabelsVisible;
+            _gradeLabel.gameObject.SetActive(show);
+            if (!show)
+                return;
+
+            var length = Mathf.Max(0.01f, _segment.GetLength());
+            var rise = _segment.b.transform.localPosition.y
+                       - _segment.a.transform.localPosition.y;
+            var grade = rise / length * 100f;
+            _gradeLabel.text = (grade >= 0f ? "+" : string.Empty)
+                               + grade.ToString("0.00")
+                               + "%  A->B";
+            _gradeLabel.transform.localPosition =
+                _segment.Curve.GetPoint(0.5f)
+                + new Vector3(0f, 1.35f, 0f);
+        }
+
         private void BuildVisual()
         {
             if (_segment == null || _segment.a == null || _segment.b == null)
@@ -324,6 +353,23 @@ namespace Hrogers.TileEditorBridge
             _line.useWorldSpace = false;
             _line.positionCount = points.Length;
             _line.SetPositions(points);
+
+            var gradeObject = transform.Find("TileEditorGradeLabel")
+                              ?.gameObject;
+            if (gradeObject == null)
+            {
+                gradeObject = new GameObject("TileEditorGradeLabel");
+                gradeObject.transform.SetParent(transform, false);
+            }
+            _gradeLabel = gradeObject.GetComponent<TextMesh>()
+                          ?? gradeObject.AddComponent<TextMesh>();
+            _gradeLabel.anchor = TextAnchor.MiddleCenter;
+            _gradeLabel.alignment = TextAlignment.Center;
+            _gradeLabel.fontSize = 64;
+            _gradeLabel.characterSize = 0.11f;
+            _gradeLabel.color = new Color(1f, 0.86f, 0.20f, 1f);
+            TileEditorGradeLabelBillboards.Register(_gradeLabel);
+            RefreshGradeLabel();
 
             var length = Mathf.Max(1f, _segment.GetLength());
             // The colliders span their section of track, so dense 12 m
@@ -380,5 +426,103 @@ namespace Hrogers.TileEditorBridge
                 .ToArray();
         }
 
+        private void OnDestroy()
+        {
+            TileEditorGradeLabelBillboards.Unregister(_gradeLabel);
+        }
+
+    }
+
+    /// <summary>
+    /// Billboards every visible segment-grade label from one throttled Unity
+    /// callback. A whole-map graph can contain thousands of segments; giving
+    /// every segment its own LateUpdate caused thousands of Camera.main lookups
+    /// and callbacks per frame whenever grade labels were enabled.
+    /// </summary>
+    internal static class TileEditorGradeLabelBillboards
+    {
+        private static readonly List<TextMesh> Labels = new List<TextMesh>();
+        private static TileEditorGradeLabelBillboardRunner _runner;
+
+        internal static void Register(TextMesh label)
+        {
+            if (label == null || Labels.Contains(label))
+                return;
+            Labels.Add(label);
+            EnsureRunner();
+        }
+
+        internal static void Unregister(TextMesh label)
+        {
+            if (label != null)
+                Labels.Remove(label);
+            RemoveDestroyedLabels();
+            if (Labels.Count != 0 || _runner == null)
+                return;
+            var host = _runner.gameObject;
+            _runner = null;
+            if (host != null)
+                UnityEngine.Object.Destroy(host);
+        }
+
+        internal static void Refresh(Camera camera)
+        {
+            if (camera == null)
+                return;
+            var cameraPosition = camera.transform.position;
+            for (var index = Labels.Count - 1; index >= 0; index--)
+            {
+                var label = Labels[index];
+                if (label == null)
+                {
+                    Labels.RemoveAt(index);
+                    continue;
+                }
+                if (!label.gameObject.activeInHierarchy)
+                    continue;
+                var direction = label.transform.position - cameraPosition;
+                if (direction.sqrMagnitude > 0.0001f)
+                {
+                    label.transform.rotation = Quaternion.LookRotation(
+                        direction.normalized,
+                        Vector3.up);
+                }
+            }
+        }
+
+        private static void EnsureRunner()
+        {
+            if (_runner != null)
+                return;
+            var host = new GameObject("TileEditor.GradeLabelBillboards")
+            {
+                hideFlags = HideFlags.HideAndDontSave,
+            };
+            _runner = host.AddComponent<TileEditorGradeLabelBillboardRunner>();
+        }
+
+        private static void RemoveDestroyedLabels()
+        {
+            for (var index = Labels.Count - 1; index >= 0; index--)
+            {
+                if (Labels[index] == null)
+                    Labels.RemoveAt(index);
+            }
+        }
+    }
+
+    internal sealed class TileEditorGradeLabelBillboardRunner : MonoBehaviour
+    {
+        private const float RefreshInterval = 0.05f;
+        private float _nextRefreshAt;
+
+        private void LateUpdate()
+        {
+            var now = Time.unscaledTime;
+            if (now < _nextRefreshAt)
+                return;
+            _nextRefreshAt = now + RefreshInterval;
+            TileEditorGradeLabelBillboards.Refresh(Camera.main);
+        }
     }
 }

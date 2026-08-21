@@ -87,6 +87,7 @@ namespace Hrogers.TileEditorBridge
                 {
                     SyncNodeTransformFields(selected, false);
                     DrawNodeSelectionSummary(selected);
+                    DrawNodeSegmentRelationships(selected);
                     GUILayout.Space(6f);
                     DrawCompactNodeEditor(selected);
                 }
@@ -178,6 +179,29 @@ namespace Hrogers.TileEditorBridge
                 + "°",
                 _mutedStyle);
             GUILayout.EndVertical();
+        }
+
+        private void DrawNodeSegmentRelationships(
+            TileEditorGraphSession.SelectionInfo node)
+        {
+            GUILayout.Space(4f);
+            GUILayout.Label(
+                "CONNECTED SEGMENTS (" + node.ConnectedSegmentIds.Length + ")",
+                _mutedStyle);
+            if (node.ConnectedSegmentIds.Length == 0)
+            {
+                GUILayout.Label("This node is not used by a segment.", _lineStyle);
+                return;
+            }
+            foreach (var segmentId in node.ConnectedSegmentIds)
+            {
+                if (GUILayout.Button(
+                        "Select segment  " + segmentId,
+                        GUILayout.Height(27f)))
+                {
+                    _mapEditor.SelectSegmentById(segmentId);
+                }
+            }
         }
 
         private void DrawNodeWindowBackdrop()

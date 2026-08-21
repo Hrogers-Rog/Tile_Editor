@@ -14,6 +14,7 @@ from .constants import (
     VEG_NAMES,
     _MOD_AVAILABLE, _BRIDGE_AVAILABLE,
 )
+from .terrain import interpolate_stroke_points
 
 try:
     from railroader_bridge import RailroaderBridge, preferred_railroader_path
@@ -1701,7 +1702,9 @@ class EventsMixin:
             step = max(1, self.brush_radius // 2)
             lp = self._last_paint_pos
             if lp is None or math.hypot(mx - lp[0], my - lp[1]) >= step:
-                self._paint_at(mx, my, erase=btn[2])
+                for paint_x, paint_y in interpolate_stroke_points(
+                        lp, (mx, my), step):
+                    self._paint_at(paint_x, paint_y, erase=btn[2])
                 self._last_paint_pos = (mx, my)
         elif self.sel_dragging and self.select_mode:
             if self.sel_tool == 'lasso':

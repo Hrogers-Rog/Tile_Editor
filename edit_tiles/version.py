@@ -1,3 +1,3 @@
 """Tile Editor suite version."""
 
-__version__ = "0.26.4"
+__version__ = "0.26.8"

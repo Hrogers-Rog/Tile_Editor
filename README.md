@@ -26,7 +26,8 @@ An older printable guide ships as `HunterR_Map_Editor_Guide.pdf`.
   right-of-way
 - **Track** — visual node and segment editing on real terrain, with arcs, grades,
   parallel track, turnouts, wyes, spans, and turntables
-- **Splineys** — roads, rivers, and trestle bridges as editable splines
+- **Splineys** — roads, rivers, trestle bridges, and native repeated-object
+  lines for fences, retaining walls, guardrails, and similar modules
 - **Operations** — towns, industries, components, progression, stations, loaders
 - **Scenery and objects** — place assets, and move or clone base-game props as
   portable mandelas
@@ -51,15 +52,26 @@ player-owned locomotives in Waypoint Auto Engineer mode as well as AI equipment.
 
 ## Compatibility
 
-RailLoader `game-graph.json` is the portable baseline — FUSE imports it including
-Narrow Gauge metadata, while RailLoader safely ignores the extra `gauge` field.
-Native FUSE packages are editable too: the selectors read `Info.json`'s
-`FuseDataFiles`, and `.fuse.json` fragments keep their native structure instead of
-being rewritten as legacy JSON.
+Native FUSE is the canonical format for new work. It supports complete standalone
+maps and every editor capability. RailLoader `game-graph.json` remains an
+optional compatibility output for older data mods; controls that it cannot
+represent are disabled instead of weakening or rewriting the native schema.
+The selectors read `Info.json`'s `FuseDataFiles`, and `.fuse.json` fragments keep
+their native structure.
 
 RailLoader `Definition.json` (manifest version 8) remains available for portable
 content; FUSE-only operations can live in native fragments when the legacy schema
 cannot express them.
+
+Both the desktop **New Mod** wizard and the in-game F9 chooser distinguish a
+stock-map add-on from a standalone map. A standalone project creates the native
+map declaration plus `Map/Map.json`; terrain generation then uses that map's own
+latitude, longitude, and tile size rather than the stock North Carolina origin.
+
+The desktop view reduces unchanged whole-map redraws automatically: active
+editing remains 60 FPS, an idle window uses 15 FPS, and a minimized window uses
+5 FPS. The in-game bridge coalesces heartbeat file writes, so leaving the editor
+open beside Railroader does not create an unbounded I/O queue.
 
 Narrow and dual-gauge rail geometry is rendered by
 [FUSE Narrow Gauge](https://github.com/Hrogers-Rog/Narrow_Gauge), not by

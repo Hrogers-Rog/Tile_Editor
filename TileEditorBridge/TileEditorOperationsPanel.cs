@@ -32,6 +32,7 @@ namespace Hrogers.TileEditorBridge
         private string _opsMarkedSpanStartSegment = string.Empty;
         private float _opsMarkedSpanStartDistance;
         private string _opsIndustryId = "industry:new";
+        private string _opsIndustryRemovalId = string.Empty;
         private string _opsIndustryName = "New Industry";
         private string _opsAreaId = "town:new";
         private bool _opsUsesContract = true;
@@ -62,6 +63,9 @@ namespace Hrogers.TileEditorBridge
         private string _opsPassengerPopulation = "5";
         private string _opsPassengerBranch = "Main";
         private string _opsPassengerNeighbors = string.Empty;
+        private string _opsPassengerTraverseMinutes = "0";
+        private string _opsPassengerMapFeature = string.Empty;
+        private string _opsPassengerIntermediates = string.Empty;
         private string _opsOutputSpanIds = string.Empty;
         private string _opsConvertedLoadId = string.Empty;
         private bool _opsShowAdvancedComponent;
@@ -75,6 +79,19 @@ namespace Hrogers.TileEditorBridge
         private string _opsPhysicalLoaderId = "loader:new";
         private string _opsPhysicalLoaderPrefab =
             "vanilla://waterTower";
+        private bool _opsPhysicalLoaderSnapToTrack = true;
+        private bool _opsPhysicalLoaderRightSide = true;
+        private string _opsPhysicalLoaderSideOffset = "3";
+        private string _opsPhysicalLoaderAlongOffset = "0";
+        private string _opsPhysicalLoaderVerticalOffset = "0";
+        private string _opsPhysicalLoaderHeadingOffset = "0";
+        private string _opsToolshedFacilityId =
+            "toolshed:facility:new";
+        private string _opsToolshedLoadPointId = string.Empty;
+        private string _opsToolshedServiceLoadId = "bunker-c";
+        private string _opsToolshedSpanIds = "span:new";
+        private bool _opsToolshedRequireAuthoredLoadPoints = true;
+        private bool _opsToolshedAssetsLoaded;
         private string _opsStationAgentId = "station-agent:new";
         private string _opsStationAgentPrefab =
             "empty://stationAgent";
@@ -178,10 +195,10 @@ namespace Hrogers.TileEditorBridge
             if (!_mapEditor.FuseOperationsDocument)
             {
                 GUILayout.Label(
-                    "Legacy turntables and physical service loaders are stored "
-                    + "in the buildings/splineys layer. Towns and industries are "
-                    + "usually stored in industries.json.",
-                    _mutedStyle);
+                    "LIMITED LEGACY MODE - this layer cannot represent every "
+                    + "native FUSE operation. Unsupported controls are disabled. "
+                    + "Create a native FUSE package for full authoring.",
+                    _offlineStyle);
             }
 
             GUILayout.BeginHorizontal();
@@ -365,6 +382,16 @@ namespace Hrogers.TileEditorBridge
                 RunGameAction(
                     "Centered " + selected.Id,
                     _mapEditor.ShowSelectedOperation);
+            }
+            GUI.enabled = _mapEditor.CanMoveSelectedOperation;
+            if (GUILayout.Button(
+                    "Move...",
+                    GUILayout.Height(27f)))
+            {
+                ArmPointerPlacement(
+                    PointerPlacementKind.OperationsMoveSelected,
+                    selected.Key,
+                    false);
             }
             GUI.enabled = selected.Kind
                           != TileEditorGraphSession.OperationKind.Commodity;
@@ -585,6 +612,33 @@ namespace Hrogers.TileEditorBridge
             GUILayout.Space(6f);
             GUILayout.Label("ADD RAIL OPERATIONS", _titleStyle);
             DrawComponentBuilder(false);
+            GUILayout.Space(8f);
+            GUILayout.Label("REMOVE A BASE-GAME INDUSTRY", _titleStyle);
+            GUILayout.Label(
+                "Enter the exact runtime industry ID. This writes a native "
+                + "FUSE operations.removals.industries directive; it does not "
+                + "remove the industry's track or scenery.",
+                _lineStyle);
+            DrawTextField(
+                "Base industry ID",
+                ref _opsIndustryRemovalId);
+            GUI.enabled = _mapEditor.FuseOperationsDocument;
+            if (GUILayout.Button(
+                    "ADD INDUSTRY REMOVAL",
+                    GUILayout.Height(32f)))
+            {
+                RunGameAction(
+                    () => _mapEditor.RemoveBaseIndustry(
+                        _opsIndustryRemovalId));
+            }
+            GUI.enabled = true;
+            if (!_mapEditor.FuseOperationsDocument)
+            {
+                GUILayout.Label(
+                    "Native FUSE only. Legacy RailLoader JSON cannot safely "
+                    + "represent this operation in every load order.",
+                    _mutedStyle);
+            }
         }
 
         private void DrawPassengerBuilder()
@@ -592,9 +646,8 @@ namespace Hrogers.TileEditorBridge
             GUILayout.Label("PASSENGER STATION", _titleStyle);
             GUILayout.Label(
                 "Choose an industry/depot and TrackSpan. This creates a "
-                + "passenger-stop component with safe defaults; timetable code, "
-                + "population, neighbors, and branch details remain editable "
-                + "in the saved JSON until the advanced form is added.",
+                + "complete passenger-stop component. Stop IDs and timetable "
+                + "codes must be unique; normally list neighbors both ways.",
                 _lineStyle);
             DrawTextField("Depot industry ID", ref _opsIndustryId);
             DrawTextField("Component ID", ref _opsComponentId);
@@ -615,6 +668,22 @@ namespace Hrogers.TileEditorBridge
             DrawTextField(
                 "Neighbor stop IDs",
                 ref _opsPassengerNeighbors);
+            DrawTextField(
+                "Time to next stop (min)",
+                ref _opsPassengerTraverseMinutes);
+            DrawTextField(
+                "Required map feature",
+                ref _opsPassengerMapFeature);
+            GUILayout.Label(
+                "INTERMEDIATE STOPS  (id|code|minutes, one per line)",
+                _titleStyle);
+            _opsPassengerIntermediates = GUILayout.TextArea(
+                _opsPassengerIntermediates ?? string.Empty,
+                GUILayout.Height(58f));
+            GUILayout.Label(
+                "Example: notla|NOT|9. Leave time, map feature, and the "
+                + "intermediate list empty/zero for a simple station.",
+                _mutedStyle);
             _opsSharedStorage = GUILayout.Toggle(
                 _opsSharedStorage,
                 " Shared storage");
@@ -698,9 +767,20 @@ namespace Hrogers.TileEditorBridge
             GUILayout.EndHorizontal();
             GUILayout.Space(7f);
             GUILayout.Label("PLACE A PHYSICAL SERVICE OBJECT", _titleStyle);
+            GUILayout.Label(
+                "Vanilla/FUSE loaders clone a working loader prefab. A custom "
+                + "Toolshed asset is placed as FUSE scenery and bound through "
+                + "ToolshedServiceFacilities.json in one save-safe action.",
+                _mutedStyle);
             DrawTextField("Object ID", ref _opsPhysicalLoaderId);
-            DrawTextField("Prefab", ref _opsPhysicalLoaderPrefab);
+            DrawTextField(
+                "Prefab / asset identifier",
+                ref _opsPhysicalLoaderPrefab);
             DrawTextField("Owning industry", ref _opsIndustryId);
+            DrawLoaderSnapControls();
+
+            GUILayout.Space(5f);
+            GUILayout.Label("VANILLA / FUSE PREFAB LOADER", _titleStyle);
             GUILayout.BeginHorizontal();
             if (GUILayout.Button("Water Tower"))
                 _opsPhysicalLoaderPrefab = "vanilla://waterTower";
@@ -716,14 +796,128 @@ namespace Hrogers.TileEditorBridge
                     string.Empty,
                     false);
             }
+
+            GUILayout.Space(8f);
+            GUILayout.Label("CUSTOM TOOLSHED SERVICE ASSET", _titleStyle);
+            GUILayout.Label(
+                "The object ID becomes world.scenery.<id>. The facility ID is "
+                + "the unique Toolshed binding. Delivery spans refill finite "
+                + "storage; they do not position the chute or hose.",
+                _mutedStyle);
+            DrawTextField(
+                "Toolshed facility ID",
+                ref _opsToolshedFacilityId);
+            DrawTextField(
+                "Authored load point ID (optional)",
+                ref _opsToolshedLoadPointId);
+            DrawTextField(
+                "Service load ID",
+                ref _opsToolshedServiceLoadId);
+            DrawTextField(
+                "Delivery TrackSpan IDs",
+                ref _opsToolshedSpanIds);
+            _opsToolshedRequireAuthoredLoadPoints = GUILayout.Toggle(
+                _opsToolshedRequireAuthoredLoadPoints,
+                " Require authored Toolshed load points");
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("Bunker-C tank"))
+            {
+                _opsPhysicalLoaderPrefab =
+                    "scenery://ALW_Loader_TankLoader";
+                _opsToolshedLoadPointId = "FuelLoaderFill";
+                _opsToolshedServiceLoadId = "bunker-c";
+                _opsToolshedRequireAuthoredLoadPoints = true;
+            }
+            if (GUILayout.Button("Wood shed"))
+            {
+                _opsPhysicalLoaderPrefab = "scenery://wood-shed";
+                _opsToolshedLoadPointId = "WoodLoadPoint";
+                _opsToolshedServiceLoadId = "pulpwood";
+                _opsToolshedRequireAuthoredLoadPoints = true;
+            }
+            GUILayout.EndHorizontal();
+            GUI.enabled = _mapEditor.FuseOperationsDocument;
+            if (GUILayout.Button(
+                    _opsToolshedAssetsLoaded
+                        ? "REFRESH INSTALLED TOOLSHED ASSETS"
+                        : "FIND INSTALLED TOOLSHED ASSETS"))
+            {
+                RunGameAction(() =>
+                {
+                    var result = _mapEditor
+                        .RefreshToolshedServiceAssets();
+                    _opsToolshedAssetsLoaded = true;
+                    return result;
+                });
+            }
+            foreach (var asset in _mapEditor.ToolshedServiceAssets.Take(12))
+            {
+                if (GUILayout.Button("USE  " + asset.DisplayLabel))
+                {
+                    _opsPhysicalLoaderPrefab =
+                        "scenery://" + asset.ModelIdentifier;
+                    _opsToolshedLoadPointId = asset.LoadPointId;
+                    _opsToolshedServiceLoadId = asset.ServiceLoadId;
+                    _opsToolshedRequireAuthoredLoadPoints = true;
+                }
+            }
+            if (_mapEditor.ToolshedServiceAssets.Count > 12)
+            {
+                GUILayout.Label(
+                    "Showing 12 installed service assets.",
+                    _mutedStyle);
+            }
+            if (GUILayout.Button(
+                    "PLACE CUSTOM TOOLSHED FACILITY WITH POINTER",
+                    GUILayout.Height(36f)))
+            {
+                ArmPointerPlacement(
+                    PointerPlacementKind.OperationsToolshedFacility,
+                    string.Empty,
+                    false);
+            }
+            GUI.enabled = true;
             if (!_mapEditor.FuseOperationsDocument)
             {
                 GUILayout.Label(
-                    "Legacy placement writes AlinasMapMod.LoaderBuilder in "
-                    + "the current splineys layer. Native FUSE placement has "
-                    + "no Alina dependency.",
+                    "Legacy placement can write AlinasMapMod.LoaderBuilder, "
+                    + "but custom Toolshed scenery bindings are FUSE-native "
+                    + "and are disabled in RailLoader output mode.",
                     _mutedStyle);
             }
+
+            GUILayout.Space(12f);
+            DrawTurntableBuilder();
+        }
+
+        private void DrawLoaderSnapControls()
+        {
+            _opsPhysicalLoaderSnapToTrack = GUILayout.Toggle(
+                _opsPhysicalLoaderSnapToTrack,
+                " Snap to selected/nearest track");
+            if (!_opsPhysicalLoaderSnapToTrack)
+                return;
+            _opsPhysicalLoaderRightSide = GUILayout.Toggle(
+                _opsPhysicalLoaderRightSide,
+                " Place on right side of A->B");
+            DrawTextField(
+                "Distance from track (m)",
+                ref _opsPhysicalLoaderSideOffset);
+            DrawTextField(
+                "Distance along track (m)",
+                ref _opsPhysicalLoaderAlongOffset);
+            DrawTextField(
+                "Vertical offset (m)",
+                ref _opsPhysicalLoaderVerticalOffset);
+            DrawTextField(
+                "Heading adjustment (deg)",
+                ref _opsPhysicalLoaderHeadingOffset);
+            GUILayout.Label(
+                _mapEditor.SelectedSegment == null
+                    ? "No segment selected; placement uses the nearest track."
+                    : "Snapping to selected segment: "
+                      + _mapEditor.SelectedSegment.Id,
+                _mutedStyle);
         }
 
         private void DrawOperatingMarkerBuilder()
@@ -1158,6 +1352,12 @@ namespace Hrogers.TileEditorBridge
                     TimetableCode = _opsPassengerCode,
                     Branch = _opsPassengerBranch,
                     NeighborIds = _opsPassengerNeighbors,
+                    TraverseTimeToNext = ParseFloat(
+                        _opsPassengerTraverseMinutes,
+                        "time to next passenger stop"),
+                    PassengerMapFeature = _opsPassengerMapFeature,
+                    PassengerIntermediates =
+                        _opsPassengerIntermediates,
                     OutputSpanIds = _opsOutputSpanIds,
                     ConvertedLoadId = _opsConvertedLoadId,
                     CostPerUnit = ParseOptionalFloat(
@@ -1272,7 +1472,9 @@ namespace Hrogers.TileEditorBridge
             GUILayout.Label(
                 "The camera heading sets the bridge's starting heading. "
                 + "FUSE validation rejects unsafe radius, subdivision, gauge, "
-                + "or roundhouse values before the file is saved.",
+                + "or roundhouse values before the file is saved. Native FUSE "
+                + "creates the rotating bridge track; a custom model supplies "
+                + "visuals, so do not lay a duplicate bridge segment.",
                 _mutedStyle);
         }
 

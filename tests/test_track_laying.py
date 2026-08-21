@@ -7,12 +7,20 @@ from pathlib import Path
 
 from edit_tiles.app import TileEditor
 from edit_tiles.bridge import BridgeMixin
+from edit_tiles.generate import (
+    _uses_stock_height_correction,
+    sync_map_json_tile_list,
+)
 from mod_project import (
     ModProject,
+    ProgressionProject,
     _bezier_control_points,
     _cubic_point,
     build_vertical_alignment,
     create_trestle_from_segment,
+    mandela_set,
+    scenery_set,
+    spliney_add_road,
     generate_turnout,
     generate_wye,
     turnout_leg_pose,
@@ -52,7 +60,7 @@ class TrackLayingTests(unittest.TestCase):
         editor._set_status = lambda _message: None
         return editor
 
-    def test_new_mod_defaults_to_railloader_map_manifest(self):
+    def test_new_mod_defaults_to_fuse_railloader_compatible_manifest(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             mod_folder = Path(temp_dir) / "TestMod"
             project = ModProject.new_mod(
@@ -74,11 +82,338 @@ class TrackLayingTests(unittest.TestCase):
             }
             self.assertEqual(
                 required_ids,
-                {
-                    "railloader",
-                    "Zamu.StrangeCustoms",
-                    "AlinaNova21.AlinasMapMod",
+                {"railloader"},
+            )
+            definition_text = (mod_folder / "Definition.json").read_text(
+                encoding="utf-8"
+            )
+            self.assertNotIn("StrangeCustoms", definition_text)
+            self.assertNotIn("AlinasMapMod", definition_text)
+
+    def test_new_mod_can_create_and_reopen_native_fuse_package(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            mod_folder = Path(temp_dir) / "NativeFuseMap"
+            project = ModProject.new_mod(
+                mod_folder,
+                "Tests.NativeFuseMap",
+                "Native FUSE Map",
+                author="Test Author",
+                loader="fuse",
+            )
+
+            self.assertTrue((mod_folder / "Info.json").is_file())
+            self.assertTrue((mod_folder / "map.fuse.json").is_file())
+            self.assertFalse((mod_folder / "Definition.json").exists())
+            self.assertFalse((mod_folder / "game-graph.json").exists())
+            self.assertEqual(
+                project.definition["FuseDataFiles"],
+                ["map.fuse.json"],
+            )
+            self.assertEqual(
+                project.definition["Requirements"],
+                [{"Id": "FUSE", "NotBefore": "1.0.0"}],
+            )
+            self.assertEqual(project.get_graph_layer().track_schema, "fuse")
+
+            reopened = ModProject.open_mod_folder(mod_folder)
+            reopened_graph = reopened.get_graph_layer()
+            self.assertIsNotNone(reopened_graph)
+            self.assertEqual(reopened_graph.path.name, "map.fuse.json")
+            self.assertEqual(reopened_graph.track_schema, "fuse")
+
+    def test_new_mod_can_scaffold_complete_native_map_package(self):
+        from jsonschema import Draft202012Validator
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            mod_folder = Path(temp_dir) / "StandaloneMap"
+            project = ModProject.new_mod(
+                mod_folder,
+                "Tests.StandaloneMap",
+                "Standalone Map",
+                author="Test Author",
+                loader="fuse",
+                complete_map=True,
+                map_origin_lat=40.43,
+                map_origin_lon=-77.72,
+            )
+
+            definition = json.loads(
+                (mod_folder / "map.fuse.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(definition["map"], {
+                "displayName": "Standalone Map",
+                "mapFolder": "Map",
+                "suppressBaseWorld": True,
+            })
+            manifest = json.loads(
+                (mod_folder / "Map" / "Map.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(manifest["origin"], {
+                "latitude": 40.43,
+                "longitude": -77.72,
+            })
+            self.assertEqual(manifest["tileDimension"], 500.0)
+            self.assertEqual(manifest["tiles"], [])
+            self.assertEqual(project.get_graph_layer().track_schema, "fuse")
+
+            schema = json.loads(
+                (
+                    Path(__file__).resolve().parents[2]
+                    / "FUSE"
+                    / "schemas"
+                    / "fuse-mod.schema.json"
+                ).read_text(encoding="utf-8")
+            )
+            Draft202012Validator(schema).validate(definition)
+
+    def test_map_manifest_sync_tracks_signed_tile_files(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            map_folder = Path(temp_dir) / "Map"
+            map_folder.mkdir()
+            (map_folder / "tile_002_-003.data").write_bytes(b"tile")
+            (map_folder / "tile_-001_010.data").write_bytes(b"tile")
+            (map_folder / "ignore.data").write_bytes(b"not a tile")
+
+            result = sync_map_json_tile_list(
+                map_folder,
+                origin_lat=41.0,
+                origin_lon=-78.0,
+                tile_dimension_m=500,
+                origin_e_bias=0,
+                origin_n_bias=0,
+            )
+
+            self.assertEqual(result, map_folder / "Map.json")
+            document = json.loads(result.read_text(encoding="utf-8"))
+            self.assertEqual(document["tiles"], [
+                {"x": -1, "y": 10},
+                {"x": 2, "y": -3},
+            ])
+            self.assertEqual(document["origin"]["eastBiasMeters"], 0.0)
+            self.assertEqual(document["origin"]["northBiasMeters"], 0.0)
+
+    def test_stock_height_correction_does_not_leak_into_custom_maps(self):
+        self.assertTrue(
+            _uses_stock_height_correction(35.382614, -83.49541)
+        )
+        self.assertFalse(_uses_stock_height_correction(40.43, -77.72))
+
+    def test_native_desktop_world_tools_write_fuse_containers(self):
+        from jsonschema import Draft202012Validator
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            mod_folder = Path(temp_dir) / "NativeWorldTools"
+            project = ModProject.new_mod(
+                mod_folder,
+                "Tests.NativeWorldTools",
+                "Native World Tools",
+                author="Test Author",
+                loader="fuse",
+            )
+            graph = project.get_graph_layer()
+            graph.set_node("n1", 0, 1, 0, 0, 0, 0)
+            graph.set_node("n2", 20, 1, 0, 0, 0, 0)
+            graph.set_segment(
+                "s1", "n1", "n2", "Mainline", "Standard", 20, 0, ""
+            )
+            scenery_set(
+                graph, "scenery.test", "freight-house-general",
+                1, 2, 3, rotY=45,
+            )
+            spliney_add_road(
+                graph,
+                "road.test",
+                "RAM Road profile",
+                [
+                    {
+                        "position": {"x": 0, "y": 1, "z": 0},
+                        "rotation": {"x": 0, "y": 0, "z": 0},
+                        "width": 5,
+                    },
+                    {
+                        "position": {"x": 20, "y": 1, "z": 0},
+                        "rotation": {"x": 0, "y": 0, "z": 0},
+                        "width": 5,
+                    },
+                ],
+            )
+            mandela_set(
+                graph,
+                "World/Test/TownSign",
+                instantiate_from="World/Base/TownSign",
+                x=5,
+                y=2,
+                z=7,
+            )
+            graph.save()
+
+            saved = json.loads(graph.path.read_text(encoding="utf-8"))
+            self.assertNotIn("scenery", saved)
+            self.assertNotIn("splineys", saved)
+            self.assertNotIn("mandelas", saved)
+            self.assertEqual(
+                saved["world"]["scenery"]["scenery.test"]["assetIdentifier"],
+                "scenery://freight-house-general",
+            )
+            self.assertEqual(
+                saved["world"]["splineys"]["road.test"]["type"],
+                "road",
+            )
+            clone = next(iter(saved["world"]["sceneClones"].values()))
+            self.assertEqual(clone["targetPath"], "World/Test/TownSign")
+            self.assertEqual(
+                clone["source"], "path://scene/World/Base/TownSign"
+            )
+            self.assertNotIn(
+                "groupId", saved["tracks"]["segments"]["s1"]
+            )
+
+            schema_path = (
+                Path(__file__).resolve().parents[2]
+                / "FUSE" / "schemas" / "fuse-mod.schema.json"
+            )
+            schema = json.loads(schema_path.read_text(encoding="utf-8"))
+            errors = list(Draft202012Validator(schema).iter_errors(saved))
+            self.assertEqual(errors, [], "\n".join(error.message for error in errors))
+
+    def test_native_desktop_towns_split_tracks_and_operations(self):
+        from jsonschema import Draft202012Validator
+        from mod_project import Area
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project = ModProject.new_mod(
+                Path(temp_dir) / "NativeTowns",
+                "Tests.NativeTowns",
+                "Native Towns",
+                author="Test Author",
+                loader="fuse",
+            )
+            graph = project.get_graph_layer()
+            editor = self._make_editor(project)
+            editor._area_dirty_layers = set()
+            area = Area("town.test", {
+                "name": "Test Town",
+                "position": {"x": 100, "y": 5, "z": 200},
+                "radius": 400,
+                "order": 0,
+                "tagColor": [0.2, 0.4, 0.6],
+                "industries": {
+                    "industry.test": {
+                        "name": "Test Industry",
+                        "localPosition": {"x": 10, "y": 0, "z": -20},
+                        "usesContract": True,
+                        "components": {
+                            "loader.test": {
+                                "type": "Model.Ops.IndustryLoader",
+                                "name": "Test Loader",
+                                "trackSpans": ["span.test"],
+                                "loadId": "coal",
+                                "sharedStorage": True,
+                                "customSwitch": "preserved",
+                            }
+                        },
+                    }
                 },
+            })
+            editor.prog_project = type("ProgressionStub", (), {
+                "areas": {"town.test": area},
+                "area_layer": {"town.test": project.layers.index(graph)},
+            })()
+
+            layer_index, layer = editor._ensure_town_layer("ignored-town.json")
+            self.assertIs(layer, graph)
+            self.assertEqual(layer_index, project.layers.index(graph))
+            editor._sync_area_to_layer("town.test")
+            graph.save()
+
+            saved = json.loads(graph.path.read_text(encoding="utf-8"))
+            self.assertNotIn("areas", saved)
+            self.assertIn("town.test", saved["tracks"]["areas"])
+            industry = saved["operations"]["industries"]["industry.test"]
+            self.assertEqual(industry["areaId"], "town.test")
+            self.assertEqual(
+                industry["position"], {"x": 110.0, "y": 5.0, "z": 180.0}
+            )
+            component = industry["components"]["loader.test"]
+            self.assertEqual(component["trackSpanIds"], ["span.test"])
+            self.assertNotIn("trackSpans", component)
+            self.assertEqual(
+                component["fields"]["customSwitch"], "preserved"
+            )
+
+            schema_path = (
+                Path(__file__).resolve().parents[2]
+                / "FUSE" / "schemas" / "fuse-mod.schema.json"
+            )
+            schema = json.loads(schema_path.read_text(encoding="utf-8"))
+            errors = list(Draft202012Validator(schema).iter_errors(saved))
+            self.assertEqual(errors, [], "\n".join(error.message for error in errors))
+
+    def test_native_desktop_progression_uses_progression_contract(self):
+        from jsonschema import Draft202012Validator
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project = ModProject.new_mod(
+                Path(temp_dir) / "NativeProgression",
+                "Tests.NativeProgression",
+                "Native Progression",
+                author="Test Author",
+                loader="fuse",
+            )
+            progression = ProgressionProject(project)
+            self.assertIs(progression._prog_layer, project.get_graph_layer())
+            progression.add_feature("feature.test", "Test Feature")
+            progression.add_section(
+                "section.test", "Test Section", [], 2500, "feature.test"
+            )
+            progression.save()
+
+            saved = json.loads(
+                project.get_graph_layer().path.read_text(encoding="utf-8")
+            )
+            self.assertNotIn("mapFeatures", saved)
+            self.assertNotIn("progressions", saved)
+            native = saved["progression"]
+            self.assertIn("feature.test", native["mapFeatures"])
+            progression_id = "Tests.NativeProgression"
+            section = native["progressions"][progression_id]["sections"][
+                "section.test"
+            ]
+            self.assertEqual(
+                section["enableFeaturesOnUnlock"], ["feature.test"]
+            )
+            self.assertEqual(section["prerequisiteSectionIds"], [])
+
+            schema_path = (
+                Path(__file__).resolve().parents[2]
+                / "FUSE" / "schemas" / "fuse-mod.schema.json"
+            )
+            schema = json.loads(schema_path.read_text(encoding="utf-8"))
+            errors = list(Draft202012Validator(schema).iter_errors(saved))
+            self.assertEqual(errors, [], "\n".join(error.message for error in errors))
+
+    def test_new_mod_rejects_invalid_id_and_non_empty_target(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            with self.assertRaises(ValueError):
+                ModProject.new_mod(
+                    root / "Invalid",
+                    "Invalid Mod-ID",
+                    "Invalid",
+                )
+
+            occupied = root / "Occupied"
+            occupied.mkdir()
+            (occupied / "keep.txt").write_text("keep", encoding="utf-8")
+            with self.assertRaises(FileExistsError):
+                ModProject.new_mod(
+                    occupied,
+                    "Tests.Occupied",
+                    "Occupied",
+                )
+            self.assertEqual(
+                (occupied / "keep.txt").read_text(encoding="utf-8"),
+                "keep",
             )
 
     def test_create_node_is_saved_merged_selected_and_visible(self):

@@ -1,5 +1,8 @@
 """edit_tiles.generate — Mapbox terrain tile generation."""
+import json
 import math
+import os
+import re
 import time
 import struct
 from pathlib import Path
@@ -115,9 +118,29 @@ def _gen_mosaic(left_px, top_px, right_px, bottom_px, token):
     return (-10000.0 + 0.1*(arr[:,:,0]*65536 + arr[:,:,1]*256 + arr[:,:,2]),
             tx0*sz, ty0*sz)
 
-def _gen_sample_heights(gx, gy, token):
+def _uses_stock_height_correction(origin_lat, origin_lon) -> bool:
+    """Return whether the old Bushnell/Whittier elevation correction applies."""
+    return (
+        abs(float(origin_lat) - GEN_ORIGIN_LAT) < 0.0001
+        and abs(float(origin_lon) - GEN_ORIGIN_LON) < 0.0001
+    )
+
+
+def _gen_sample_heights(gx, gy, token,
+                        origin_lat=GEN_ORIGIN_LAT,
+                        origin_lon=GEN_ORIGIN_LON,
+                        tile_dimension_m=GEN_TILE_DIM_M,
+                        origin_e_bias=GEN_ORIGIN_E_BIAS,
+                        origin_n_bias=GEN_ORIGIN_N_BIAS):
     from scipy.ndimage import map_coordinates
-    (min_lat, min_lon), (max_lat, max_lon) = _gen_tile_bounds(gx, gy)
+    (min_lat, min_lon), (max_lat, max_lon) = _gen_tile_bounds(
+        gx, gy,
+        origin_lat=origin_lat,
+        origin_lon=origin_lon,
+        tile_dimension_m=tile_dimension_m,
+        origin_e_bias=origin_e_bias,
+        origin_n_bias=origin_n_bias,
+    )
     z   = GEN_MAPBOX_ZOOM
     lx  = _gen_lon_to_wpx(min_lon, z);  rx  = _gen_lon_to_wpx(max_lon, z)
     tpy = _gen_lat_to_wpy(max_lat, z);  bpy = _gen_lat_to_wpy(min_lat, z)
@@ -129,9 +152,12 @@ def _gen_sample_heights(gx, gy, token):
     yy, xx = np.meshgrid(src_y, src_x, indexing='ij')
     sampled = map_coordinates(src, [yy.ravel(), xx.ravel()],
                               order=1, mode='nearest').reshape(res, res)
-    t = np.clip((float(gx) + ax/(res-1) - GEN_OFFSET_EAST_X) /
-                (GEN_OFFSET_WEST_X - GEN_OFFSET_EAST_X), 0.0, 1.0)
-    sampled += (t * GEN_OFFSET_MAX_M).astype(np.float32)[np.newaxis, :]
+    # The westward correction compensates for a known stock-map elevation
+    # mismatch. It must never leak into a map authored at another origin.
+    if _uses_stock_height_correction(origin_lat, origin_lon):
+        t = np.clip((float(gx) + ax/(res-1) - GEN_OFFSET_EAST_X) /
+                    (GEN_OFFSET_WEST_X - GEN_OFFSET_EAST_X), 0.0, 1.0)
+        sampled += (t * GEN_OFFSET_MAX_M).astype(np.float32)[np.newaxis, :]
     return sampled
 
 def _gen_color_to_preset(color):
@@ -194,13 +220,25 @@ def _gen_pack(heights_m, veg_grid, water_grid):
     return Image.fromarray(np.stack([r_ch, g_ch, np.zeros_like(r_ch), a_ch], axis=2), "RGBA")
 
 def generate_tile(gx, gy, token, out_dir, use_nlcd=True,
-                  nlcd_blur=GEN_NLCD_BLUR, veg_override=None, progress_cb=None):
+                  nlcd_blur=GEN_NLCD_BLUR, veg_override=None, progress_cb=None,
+                  origin_lat=GEN_ORIGIN_LAT,
+                  origin_lon=GEN_ORIGIN_LON,
+                  tile_dimension_m=GEN_TILE_DIM_M,
+                  origin_e_bias=GEN_ORIGIN_E_BIAS,
+                  origin_n_bias=GEN_ORIGIN_N_BIAS):
     """Generate one tile, save to out_dir. Returns Path on success."""
     token = clean_mapbox_token(token)
     def prog(msg):
         if progress_cb: progress_cb(msg)
     prog("fetching elevation…")
-    heights = _gen_sample_heights(gx, gy, token)
+    heights = _gen_sample_heights(
+        gx, gy, token,
+        origin_lat=origin_lat,
+        origin_lon=origin_lon,
+        tile_dimension_m=tile_dimension_m,
+        origin_e_bias=origin_e_bias,
+        origin_n_bias=origin_n_bias,
+    )
     veg_grid = water_grid = None
     if veg_override is not None:
         veg_grid   = np.full((GEN_HEIGHT_RES, GEN_HEIGHT_RES), veg_override & 0x7, dtype=np.uint8)
@@ -208,7 +246,14 @@ def generate_tile(gx, gy, token, out_dir, use_nlcd=True,
     elif use_nlcd:
         try:
             prog("fetching land cover…")
-            (min_lat, min_lon), (max_lat, max_lon) = _gen_tile_bounds(gx, gy)
+            (min_lat, min_lon), (max_lat, max_lon) = _gen_tile_bounds(
+                gx, gy,
+                origin_lat=origin_lat,
+                origin_lon=origin_lon,
+                tile_dimension_m=tile_dimension_m,
+                origin_e_bias=origin_e_bias,
+                origin_n_bias=origin_n_bias,
+            )
             veg_grid, water_grid = _gen_veg_water(min_lat, min_lon, max_lat, max_lon, nlcd_blur)
         except Exception as e:
             prog(f"NLCD failed ({e}), veg=0")
@@ -225,6 +270,68 @@ def generate_tile(gx, gy, token, out_dir, use_nlcd=True,
             pass
     prog("done")
     return out
+
+
+_TILE_DATA_RE = re.compile(r'^tile_(-?\d+)_(-?\d+)\.data$', re.IGNORECASE)
+
+
+def tile_coordinates_in_folder(folder) -> list[tuple[int, int]]:
+    """Return the signed coordinates represented by tile data files."""
+    coordinates = set()
+    for path in Path(folder).glob('tile_*.data'):
+        match = _TILE_DATA_RE.fullmatch(path.name)
+        if match:
+            coordinates.add((int(match.group(1)), int(match.group(2))))
+    return sorted(coordinates)
+
+
+def sync_map_json_tile_list(folder, *, origin_lat=None, origin_lon=None,
+                            tile_dimension_m=None, origin_e_bias=None,
+                            origin_n_bias=None):
+    """Synchronize Map.json with the tile files in *folder* atomically.
+
+    An existing manifest keeps its georeference. Supplying an origin permits a
+    new manifest to be created, which is how the editor scaffolds a new map.
+    """
+    folder = Path(folder)
+    map_path = folder / 'Map.json'
+    if map_path.is_file():
+        document = json.loads(map_path.read_text(encoding='utf-8-sig'))
+        if not isinstance(document, dict):
+            raise ValueError(f"Map.json must contain an object: {map_path}")
+    else:
+        if origin_lat is None or origin_lon is None:
+            return None
+        document = {}
+
+    origin = document.get('origin')
+    if not isinstance(origin, dict):
+        if origin_lat is None or origin_lon is None:
+            raise ValueError(f"Map.json is missing a valid origin: {map_path}")
+        origin = {
+            'latitude': float(origin_lat),
+            'longitude': float(origin_lon),
+        }
+        document['origin'] = origin
+    if origin_e_bias is not None:
+        origin['eastBiasMeters'] = float(origin_e_bias)
+    if origin_n_bias is not None:
+        origin['northBiasMeters'] = float(origin_n_bias)
+
+    if tile_dimension_m is not None:
+        document['tileDimension'] = float(tile_dimension_m)
+    elif 'tileDimension' not in document:
+        document['tileDimension'] = float(GEN_TILE_DIM_M)
+    document['tiles'] = [
+        {'x': x, 'y': y}
+        for x, y in tile_coordinates_in_folder(folder)
+    ]
+
+    folder.mkdir(parents=True, exist_ok=True)
+    temporary = map_path.with_name(map_path.name + '.tmp')
+    temporary.write_text(json.dumps(document, indent=2) + '\n', encoding='utf-8')
+    os.replace(temporary, map_path)
+    return map_path
 
 
 def compute_hillshade(heights: np.ndarray) -> np.ndarray:

@@ -479,8 +479,7 @@ namespace Hrogers.TileEditorBridge
             };
 
             mutation();
-            RebuildSceneryOverlays(false);
-            SetSceneryOverlaysVisible(_editModeActive && _sceneryMode);
+            RefreshSceneryOverlays(ids);
             edit.AfterNodes = new Dictionary<string, NodeModel>();
             edit.AfterSegments = new Dictionary<string, SegmentModel>();
             edit.AfterScenery = CaptureScenery(ids);
@@ -494,6 +493,40 @@ namespace Hrogers.TileEditorBridge
             _undo.Push(edit);
             _redo.Clear();
             _dirty = true;
+        }
+
+        private void RefreshSceneryOverlays(
+            IEnumerable<string> sceneryIds)
+        {
+            foreach (var id in sceneryIds
+                         ?? Array.Empty<string>())
+            {
+                var scenery = FindLiveScenery(id, true);
+                if (scenery == null
+                    || !scenery.gameObject.activeInHierarchy)
+                {
+                    continue;
+                }
+                var overlay = scenery.GetComponentInChildren<
+                    TileEditorSceneryOverlay>(true);
+                if (overlay == null)
+                {
+                    var go = new GameObject(
+                        "TileEditorSceneryOverlay");
+                    go.transform.SetParent(
+                        scenery.transform,
+                        false);
+                    overlay = go.AddComponent<
+                        TileEditorSceneryOverlay>();
+                    overlay.Initialize(this, scenery);
+                }
+                else
+                {
+                    overlay.Refresh();
+                }
+                overlay.SetOverlayVisible(
+                    _editModeActive && _sceneryMode);
+            }
         }
 
         private void RestoreSceneryModels(EditRecord edit, bool after)
@@ -645,7 +678,10 @@ namespace Hrogers.TileEditorBridge
             var entry = existing == null
                 ? new JObject()
                 : (JObject)existing.DeepClone();
-            entry["modelIdentifier"] = model.ModelIdentifier;
+            WriteSceneryAssetIdentifier(
+                entry,
+                model.ModelIdentifier,
+                _fuseNativeDocument);
             entry["position"] = Vector(model.Position);
             entry["rotation"] = Vector(model.Rotation);
             entry["scale"] = Vector(model.Scale);
@@ -656,14 +692,107 @@ namespace Hrogers.TileEditorBridge
         {
             get
             {
-                var scenery = _document?["scenery"] as JObject;
-                if (scenery == null)
-                {
-                    scenery = new JObject();
-                    _document["scenery"] = scenery;
-                }
+                var scenery = EnsureSceneryObjectForDocument(
+                    _document,
+                    _fuseNativeDocument,
+                    out var migratedLegacyRoot);
+                if (migratedLegacyRoot)
+                    _dirty = true;
                 return scenery;
             }
+        }
+
+        internal static JObject EnsureSceneryObjectForDocument(
+            JObject document,
+            bool fuseNative,
+            out bool migratedLegacyRoot)
+        {
+            if (document == null)
+                throw new ArgumentNullException(nameof(document));
+            migratedLegacyRoot = false;
+            if (!fuseNative)
+            {
+                if (!(document["scenery"] is JObject legacyScenery))
+                {
+                    legacyScenery = new JObject();
+                    document["scenery"] = legacyScenery;
+                }
+                return legacyScenery;
+            }
+
+            if (!(document["world"] is JObject world))
+            {
+                world = new JObject();
+                document["world"] = world;
+            }
+            if (!(world["scenery"] is JObject nativeScenery))
+            {
+                nativeScenery = new JObject();
+                world["scenery"] = nativeScenery;
+            }
+
+            // Editor builds before the native-output correction wrote FUSE
+            // scenery into a root-level legacy object. Migrate it on first
+            // access. If an id already exists with different content, retain
+            // both definitions under a deterministic migrated id instead of
+            // silently discarding either author's work.
+            if (document["scenery"] is JObject misplacedScenery)
+            {
+                foreach (var property in misplacedScenery.Properties().ToArray())
+                {
+                    var targetId = property.Name;
+                    if (nativeScenery[targetId] != null
+                        && !JToken.DeepEquals(
+                            nativeScenery[targetId],
+                            property.Value))
+                    {
+                        targetId = NextMigratedSceneryId(
+                            nativeScenery,
+                            targetId);
+                    }
+                    if (nativeScenery[targetId] == null)
+                        nativeScenery[targetId] = property.Value.DeepClone();
+                }
+                document.Remove("scenery");
+                migratedLegacyRoot = true;
+            }
+            return nativeScenery;
+        }
+
+        internal static void WriteSceneryAssetIdentifier(
+            JObject entry,
+            string modelIdentifier,
+            bool fuseNative)
+        {
+            if (entry == null)
+                throw new ArgumentNullException(nameof(entry));
+            var identifier = (modelIdentifier ?? string.Empty).Trim();
+            if (fuseNative)
+            {
+                entry.Remove("modelIdentifier");
+                entry.Remove("model");
+                entry["assetIdentifier"] = identifier.IndexOf(
+                    "://",
+                    StringComparison.Ordinal) >= 0
+                    ? identifier
+                    : "scenery://" + identifier;
+                return;
+            }
+
+            entry.Remove("assetIdentifier");
+            entry["modelIdentifier"] = identifier;
+        }
+
+        private static string NextMigratedSceneryId(
+            JObject scenery,
+            string baseId)
+        {
+            var prefix = (baseId ?? "scenery") + ".migrated";
+            var candidate = prefix;
+            var sequence = 2;
+            while (scenery[candidate] != null)
+                candidate = prefix + sequence++;
+            return candidate;
         }
 
         private void ValidateSceneryIdentifier(string identifier)

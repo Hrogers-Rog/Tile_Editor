@@ -20,11 +20,32 @@ in roughly 500 ms.
 The two-click drag is deliberate: one click selects, a second starts the move, so
 you cannot nudge a node by accident while inspecting it.
 
+## Deferred Track Preview
+
+Large maps can make Railroader pause while it rebuilds rails, ballast, switches,
+and gauge topology after every edit. In **F9 → Geo**, enable **Preview track
+edits as yellow guides; rebuild on Apply** to batch that work.
+
+While enabled:
+
+- node and segment data, undo/redo history, and yellow guide geometry update
+  immediately;
+- existing rendered track remains in its last applied position;
+- Railroader track meshes and Narrow Gauge topology are not rebuilt after each
+  change; and
+- the top button changes to **Apply Track (N)** when work is pending.
+
+Press **Apply Track** when you need to inspect or operate on the finished rails.
+Switching live rebuilds back on also applies pending work first. The setting is
+remembered, but it is off by default so the established live-rebuild workflow is
+unchanged.
+
 ## Node Properties
 
 | Control | What it does |
 | --- | --- |
 | X / Y / Z | Direct position editing — click, type, Enter |
+| Local move | Uses the node's full rotation; forward/back follows pitch/grade |
 | RotY nudge | Fine grid: ±90 / 45 / 30 / 15 / 10 / 5 / 1 / 0.1 / 0.05 / 0.001° |
 | Flatten | Zeros rotX and rotZ, levelling the node on terrain |
 | Reverse | Flips heading 180° |
@@ -36,6 +57,14 @@ you cannot nudge a node by accident while inspecting it.
 Paste Y is the tool for levelling a run: copy from a node at the right elevation,
 then paste height onto each node along the tangent without disturbing plan
 position.
+
+For an existing route, open **Geo → Grade → Smooth existing track** and add at
+least three connected nodes in travel order. **Read Current End Grades** measures
+the first and last segment, or enter the desired entry and exit grades yourself.
+**Smooth Existing Grade Chain** keeps both endpoint elevations fixed and solves a
+continuous vertical curve through every intermediate node, updating elevation
+and pitch together as one undoable operation. Switches, disconnected/duplicate
+nodes, zero-length runs, and curves exceeding the grade safety limit are blocked.
 
 The connected-segments list at the bottom of the node panel is clickable.
 
@@ -78,6 +107,13 @@ settings for angle and length.
 For a full switch with proper geometry, use **Geo → Turnout**: select the node,
 Preview, then Commit.
 
+If the nodes and segments exist but part of a switch has no visible rail, the
+branch is usually too tight for Railroader's turnout mesh builder. The Turnout
+and Piece tools show an estimated radius and a red warning below 35 m. Increase
+the curved lead length, reduce the divergence angle, or move the diverging node
+farther from the switch. The warning is advisory because custom track renderers
+can have different limits.
+
 ## Group Operations
 
 | Action | Result |
@@ -88,8 +124,8 @@ Preview, then Commit.
 
 ## Spliney Control Points
 
-Rivers, roads, and trestles are splines with control points — the yellow dots.
-Zoom in to click one.
+Rivers, roads, trestles, and native FUSE object lines are splines with control
+points — the colored dots. Zoom in to click one.
 
 | Control | What it does |
 | --- | --- |
@@ -105,6 +141,27 @@ Zoom in to click one.
 
 River preview arrows show flow from the first point to the last, so check them
 after a Reverse Flow.
+
+### Fence / Wall Object Lines
+
+In a native FUSE project, open **F9 → Geo → Spliney → Fence / Wall**. Choose a
+loaded scenery asset identifier (recommended) or an advanced safe scene prefab
+path, then click points just like a road. FUSE places rigid copies at uniform
+spacing along the polyline. Use:
+
+- **Spacing** for the module interval;
+- **Scale** and **Model rotation offset** to match the model's authored axes;
+- **Side/height offset** to move every module away from the centerline;
+- **Snap each module to terrain** for ground contact;
+- **Follow vertical slope** when posts/panels should pitch with the grade;
+- **Always place a final module** to close the endpoint gap; and
+- **Safety limit** to prevent an accidental tiny spacing from spawning
+  thousands of objects.
+
+This is intended for rigid fence panels, posts, retaining-wall blocks,
+guardrails, pipes, and similar repeating assets. It does not deform or stretch
+the source mesh. The object line is native FUSE only; its button is visibly
+disabled in legacy RailLoader projects because that schema has no equivalent.
 
 ## Gauge
 

@@ -41,6 +41,30 @@ namespace Hrogers.TileEditorBridge
             "Noise",
         };
 
+        private static readonly string[] VegetationPresetNames =
+        {
+            "Full (Dense Forest)",
+            "Very Dense (Woodland)",
+            "Dense (Trees + Brush)",
+            "Medium (Mixed Cover)",
+            "Light (Grass + Shrubs)",
+            "Sparse (Open Ground)",
+            "Minimal (Pasture / Crops)",
+            "Clear (Developed / Bare)",
+        };
+
+        private static readonly string[] VegetationPresetDescriptions =
+        {
+            "100% mask; maximum tree and plant placement.",
+            "About 86%; very dense vegetation such as woodland.",
+            "About 71%; dense trees and brush with small openings.",
+            "About 57%; balanced mixed vegetation and open ground.",
+            "About 43%; lighter grass, shrubs, and scattered trees.",
+            "About 29%; sparse vegetation over mostly open ground.",
+            "About 14%; minimal vegetation for pasture or cropland.",
+            "0% mask; cleared, built-up, bare, snow, or open water.",
+        };
+
         private TerrainWorkspace _terrainWorkspace =
             TerrainWorkspace.Sculpt;
         private TileEditorGraphSession.TerrainBrushMode _terrainBrushMode =
@@ -195,6 +219,11 @@ namespace Hrogers.TileEditorBridge
                     "0.00",
                     CultureInfo.InvariantCulture)
                 + " m   Vegetation " + info.VegetationId
+                + " "
+                + VegetationPresetNames[Mathf.Clamp(
+                    info.VegetationId,
+                    0,
+                    VegetationPresetNames.Length - 1)]
                 + "   Water " + (info.Water ? "yes" : "no"),
                 _lineStyle);
             GUILayout.Label(
@@ -299,22 +328,36 @@ namespace Hrogers.TileEditorBridge
                 == TileEditorGraphSession.TerrainBrushMode.Vegetation)
             {
                 GUILayout.Label(
-                    "Vegetation mask ID (0 clears vegetation)",
+                    "Vegetation land-cover preset",
                     _mutedStyle);
                 _terrainVegetationId = GUILayout.SelectionGrid(
                     Mathf.Clamp(_terrainVegetationId, 0, 7),
                     new[]
                     {
-                        "0 Clear",
-                        "1",
-                        "2",
-                        "3",
-                        "4",
-                        "5",
-                        "6",
-                        "7",
+                        "0 Full",
+                        "1 Very Dense",
+                        "2 Dense",
+                        "3 Medium",
+                        "4 Light",
+                        "5 Sparse",
+                        "6 Minimal",
+                        "7 Clear",
                     },
                     4);
+                GUILayout.Label(
+                    "PRESET "
+                    + _terrainVegetationId.ToString(
+                        CultureInfo.InvariantCulture)
+                    + "  "
+                    + VegetationPresetNames[_terrainVegetationId]
+                    + " — "
+                    + VegetationPresetDescriptions[_terrainVegetationId],
+                    _mutedStyle);
+                GUILayout.Label(
+                    "These are vegetation-density levels, not fixed biomes. "
+                    + "Track, water, objects, slopes, and the map's density "
+                    + "rules can still suppress individual plants.",
+                    _mutedStyle);
                 GUI.enabled = _terrainPointerInfo != null
                               && _terrainPointerInfo.Available;
                 if (GUILayout.Button(
@@ -712,10 +755,35 @@ namespace Hrogers.TileEditorBridge
                     now - _terrainLastDabAt,
                     0.016f,
                     0.1f);
-                var changed = _mapEditor.ApplyTerrainBrush(
-                    hit.point,
-                    BuildTerrainBrushParameters(radius),
-                    elapsed);
+                var maximumDabSpacing = Mathf.Max(
+                    0.05f,
+                    radius * spacing);
+                var dabCount = _terrainHasLastDab
+                    ? Mathf.Max(
+                        1,
+                        Mathf.CeilToInt(
+                            Vector3.Distance(
+                                _terrainLastDab,
+                                hit.point)
+                            / maximumDabSpacing))
+                    : 1;
+                var brush = BuildTerrainBrushParameters(radius);
+                var changed = 0;
+                for (var dabIndex = 1;
+                     dabIndex <= dabCount;
+                     dabIndex++)
+                {
+                    var dabPosition = _terrainHasLastDab
+                        ? Vector3.Lerp(
+                            _terrainLastDab,
+                            hit.point,
+                            dabIndex / (float)dabCount)
+                        : hit.point;
+                    changed += _mapEditor.ApplyTerrainBrush(
+                        dabPosition,
+                        brush,
+                        elapsed / dabCount);
+                }
                 _terrainLastDab = hit.point;
                 _terrainHasLastDab = true;
                 _terrainLastDabAt = now;

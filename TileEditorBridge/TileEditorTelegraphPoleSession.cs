@@ -32,6 +32,8 @@ namespace Hrogers.TileEditorBridge
             internal string FilePath;
             internal JObject Document;
             internal JObject Entry;
+            internal JArray NativeMovements;
+            internal bool Native;
         }
 
         private sealed class TelegraphPoleEdit
@@ -437,6 +439,24 @@ namespace Hrogers.TileEditorBridge
             if (_telegraphPoleSourcesDiscovered)
                 return;
             _telegraphPoleSourcesDiscovered = true;
+            if (_fuseNativeDocument)
+            {
+                var movements = NativeTelegraphPoleMovements(false);
+                if (movements != null)
+                {
+                    _telegraphPoleSources.Add(
+                        new TelegraphPoleSource
+                        {
+                            Id = "FUSE telegraph pole movements",
+                            FilePath = _graphPath,
+                            Document = _document,
+                            NativeMovements = movements,
+                            Native = true,
+                        });
+                    _telegraphPoleDocuments[_graphPath] = _document;
+                }
+                return;
+            }
             var modDirectory = FindOwningModDirectory();
             if (string.IsNullOrWhiteSpace(modDirectory))
                 return;
@@ -521,6 +541,20 @@ namespace Hrogers.TileEditorBridge
         {
             if (_telegraphPoleSources.Count > 0)
                 return _telegraphPoleSources[0];
+            if (_fuseNativeDocument)
+            {
+                var nativeSource = new TelegraphPoleSource
+                {
+                    Id = "FUSE telegraph pole movements",
+                    FilePath = _graphPath,
+                    Document = _document,
+                    NativeMovements = NativeTelegraphPoleMovements(true),
+                    Native = true,
+                };
+                _telegraphPoleSources.Add(nativeSource);
+                _telegraphPoleDocuments[_graphPath] = _document;
+                return nativeSource;
+            }
             var splineys = EnsureSplineysObject(_document);
             var id = "Tile Editor Telegraph Pole Moves";
             var suffix = 1;
@@ -571,10 +605,18 @@ namespace Hrogers.TileEditorBridge
                 return;
             }
             source.Document = _document;
-            var current = _document["splineys"]?[source.Id]
-                as JObject;
-            if (current != null)
-                source.Entry = current;
+            if (source.Native)
+            {
+                source.NativeMovements =
+                    NativeTelegraphPoleMovements(true);
+            }
+            else
+            {
+                var current = _document["splineys"]?[source.Id]
+                    as JObject;
+                if (current != null)
+                    source.Entry = current;
+            }
             _telegraphPoleDocuments[source.FilePath] = _document;
         }
 
@@ -582,6 +624,21 @@ namespace Hrogers.TileEditorBridge
             TelegraphPoleSource source,
             int poleId)
         {
+            if (source?.Native == true)
+            {
+                for (var index = 0;
+                     index < source.NativeMovements.Count;
+                     index++)
+                {
+                    if (NativeMovementContainsPole(
+                            source.NativeMovements[index] as JObject,
+                            poleId))
+                    {
+                        return index;
+                    }
+                }
+                return -1;
+            }
             if (!(ReadEntryValue(
                     source?.Entry,
                     "polesToMove") is JArray poles))
@@ -603,6 +660,18 @@ namespace Hrogers.TileEditorBridge
         {
             offset = Vector3.zero;
             var index = PoleIndex(source, poleId);
+            if (source?.Native == true)
+            {
+                if (index < 0
+                    || !(source.NativeMovements[index]
+                        is JObject nativeMovement)
+                    || !(nativeMovement["offset"] is JObject nativeOffset))
+                {
+                    return false;
+                }
+                offset = ReadMandelaVector(nativeOffset, Vector3.zero);
+                return true;
+            }
             if (index < 0
                 || !(ReadEntryValue(
                     source.Entry,
@@ -625,6 +694,11 @@ namespace Hrogers.TileEditorBridge
             bool exists,
             Vector3 offset)
         {
+            if (source?.Native == true)
+            {
+                WriteNativePoleOffset(source.NativeMovements, poleId, exists, offset);
+                return;
+            }
             var poles = EnsureEntryArray(
                 source.Entry,
                 "polesToMove");
@@ -654,6 +728,68 @@ namespace Hrogers.TileEditorBridge
                     movements.Add(new JArray(0f, 0f, 0f));
                 movements[index] = value;
             }
+        }
+
+        private JArray NativeTelegraphPoleMovements(bool create)
+        {
+            if (!_fuseNativeDocument || _document == null)
+                return null;
+            if (!(_document["world"] is JObject world))
+            {
+                if (!create)
+                    return null;
+                world = new JObject();
+                _document["world"] = world;
+            }
+            if (!(world["telegraphPoleMovements"] is JArray movements))
+            {
+                if (!create)
+                    return null;
+                movements = new JArray();
+                world["telegraphPoleMovements"] = movements;
+            }
+            return movements;
+        }
+
+        private static bool NativeMovementContainsPole(
+            JObject movement,
+            int poleId)
+        {
+            return movement?["poleIndices"] is JArray poles
+                   && poles.Any(token => (int?)token == poleId);
+        }
+
+        private static void WriteNativePoleOffset(
+            JArray movements,
+            int poleId,
+            bool exists,
+            Vector3 offset)
+        {
+            if (movements == null)
+                throw new InvalidOperationException(
+                    "The native telegraph pole movement list is unavailable.");
+
+            foreach (var movement in movements
+                         .OfType<JObject>()
+                         .ToArray())
+            {
+                if (!(movement["poleIndices"] is JArray poles))
+                    continue;
+                for (var index = poles.Count - 1; index >= 0; index--)
+                {
+                    if ((int?)poles[index] == poleId)
+                        poles.RemoveAt(index);
+                }
+                if (poles.Count == 0)
+                    movement.Remove();
+            }
+            if (!exists)
+                return;
+            movements.Add(new JObject
+            {
+                ["poleIndices"] = new JArray(poleId),
+                ["offset"] = Vector(offset),
+            });
         }
 
         private static JToken ReadEntryValue(

@@ -1,9 +1,10 @@
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
 cd /d "%~dp0"
-title Hrogers Tile Editor Suite 0.26.4
+title Hrogers Tile Editor Suite 0.26.8
 
 set "EDITOR_DIR=%~dp0TileEditor"
+set "PORTABLE_EXE=%EDITOR_DIR%\PortableRuntime\TileEditor.exe"
 set "VENV_DIR=%EDITOR_DIR%\.venv"
 set "VENV_PYTHON=%VENV_DIR%\Scripts\python.exe"
 set "PYTHON_FINDER=%~dp0Find Tile Editor Python.ps1"
@@ -13,9 +14,33 @@ if exist "%INSTALLED_GAME_DIR%\Railroader_Data" if exist "%INSTALLED_GAME_DIR%\M
 )
 
 echo ============================================================
-echo   Hrogers Tile Editor Suite 0.26.4
+echo   Hrogers Tile Editor Suite 0.26.8
 echo ============================================================
 echo.
+
+if exist "%PORTABLE_EXE%" (
+    if /i "%~1"=="--diagnose-python" (
+        echo [FOUND] Bundled portable Python runtime:
+        echo         "%PORTABLE_EXE%"
+        "%PORTABLE_EXE%" --portable-smoke-test
+        endlocal
+        exit /b %ERRORLEVEL%
+    )
+    echo [PORTABLE] Using the bundled Python runtime.
+    echo [START] Launching the desktop Tile Editor...
+    echo.
+    cd /d "%EDITOR_DIR%"
+    "%PORTABLE_EXE%" %*
+    set "EDITOR_EXIT=!ERRORLEVEL!"
+    if not "!EDITOR_EXIT!"=="0" (
+        echo.
+        echo [ERROR] The Tile Editor exited with an error.
+        echo Review "%EDITOR_DIR%\crash.log" for details.
+        echo.
+        pause
+    )
+    endlocal & exit /b !EDITOR_EXIT!
+)
 
 if not exist "%PYTHON_FINDER%" (
     echo [ERROR] The Python discovery helper is missing.

@@ -9,6 +9,14 @@ from typing import Dict, List, Optional
 from .layer import Layer
 
 
+def _id_list(value) -> list:
+    if isinstance(value, dict):
+        return [str(key) for key, enabled in value.items() if enabled]
+    if isinstance(value, (list, tuple, set)):
+        return [str(item) for item in value if str(item)]
+    return []
+
+
 class ProgressionSection:
     """One purchasable section in the progression tree."""
     __slots__ = ('id', 'display_name', 'description', 'prerequisites',
@@ -18,14 +26,18 @@ class ProgressionSection:
         self.id               = sid
         self.display_name     = d.get('displayName', sid)
         self.description      = d.get('description', '')
-        self.prerequisites    = list(d.get('prerequisiteSections', {}).keys())
+        self.prerequisites    = _id_list(
+            d.get('prerequisiteSections', d.get('prerequisiteSectionIds', []))
+        )
         self.delivery_phases  = d.get('deliveryPhases', [{'cost': 0}])
-        self.enable_features  = list(d.get('enableFeaturesOnUnlock', {}).keys())
-        self.disable_features = list(d.get('disableFeaturesOnUnlock', {}).keys())
+        self.enable_features  = _id_list(d.get('enableFeaturesOnUnlock', []))
+        self.disable_features = _id_list(d.get('disableFeaturesOnUnlock', []))
         # Confirmed in AlinasMapMod/Definitions/SerializedSection.cs --
         # features enabled when section becomes available (purchasable),
         # not just when it is fully unlocked.
-        self.enable_features_on_available = list(d.get('enableFeaturesOnAvailable', {}).keys())
+        self.enable_features_on_available = _id_list(
+            d.get('enableFeaturesOnAvailable', [])
+        )
 
     def to_dict(self):
         d = {
@@ -41,6 +53,22 @@ class ProgressionSection:
             d['enableFeaturesOnAvailable'] = {k: True for k in self.enable_features_on_available}
         return d
 
+    def to_native_dict(self):
+        d = {
+            'displayName': self.display_name,
+            'description': self.description,
+            'prerequisiteSectionIds': list(self.prerequisites),
+            'deliveryPhases': _native_delivery_phases(self.delivery_phases),
+            'enableFeaturesOnUnlock': list(self.enable_features),
+        }
+        if self.disable_features:
+            d['disableFeaturesOnUnlock'] = list(self.disable_features)
+        if self.enable_features_on_available:
+            d['enableFeaturesOnAvailable'] = list(
+                self.enable_features_on_available
+            )
+        return d
+
 
 class MapFeature:
     """A purchasable map feature unlocked by a progression section."""
@@ -53,14 +81,26 @@ class MapFeature:
         self.display_name             = d.get('displayName', fid)
         self.name                     = d.get('name', fid)
         self.description              = d.get('description', '')
-        self.prerequisites            = list(d.get('prerequisites', {}).keys())
-        self.areas_enable             = list(d.get('areasEnableOnUnlock', {}).keys())
-        self.track_groups_available   = list(d.get('trackGroupsAvailableOnUnlock', {}).keys())
-        self.track_groups_enable      = list(d.get('trackGroupsEnableOnUnlock', {}).keys())
-        self.sandbox_default          = bool(d.get('defaultEnableInSandbox', True))
-        self.unlock_exclude           = list(d.get('unlockExcludeIndustries', {}).keys())
-        self.unlock_include           = list(d.get('unlockIncludeIndustries', {}).keys())
-        self.unlock_include_components = dict(d.get('unlockIncludeIndustryComponents', {}))
+        self.prerequisites            = _id_list(
+            d.get('prerequisites', d.get('prerequisiteFeatureIds', []))
+        )
+        self.areas_enable             = _id_list(d.get('areasEnableOnUnlock', []))
+        self.track_groups_available   = _id_list(
+            d.get('trackGroupsAvailableOnUnlock', [])
+        )
+        self.track_groups_enable      = _id_list(
+            d.get('trackGroupsEnableOnUnlock', [])
+        )
+        self.sandbox_default          = bool(
+            d.get('defaultEnableInSandbox', d.get('initiallyEnabled', True))
+        )
+        self.unlock_exclude           = _id_list(d.get('unlockExcludeIndustries', []))
+        self.unlock_include           = _id_list(d.get('unlockIncludeIndustries', []))
+        self.unlock_include_components = {
+            value: True for value in _id_list(
+                d.get('unlockIncludeIndustryComponents', [])
+            )
+        }
 
     def to_dict(self):
         d = {
@@ -81,6 +121,58 @@ class MapFeature:
         if self.unlock_include_components:
             d['unlockIncludeIndustryComponents'] = self.unlock_include_components
         return d
+
+
+    def to_native_dict(self):
+        d = {
+            'displayName': self.display_name,
+            'description': self.description,
+            'prerequisiteFeatureIds': list(self.prerequisites),
+            'areasEnableOnUnlock': list(self.areas_enable),
+            'trackGroupsAvailableOnUnlock': list(
+                self.track_groups_available
+            ),
+            'trackGroupsEnableOnUnlock': list(self.track_groups_enable),
+            'initiallyEnabled': self.sandbox_default,
+        }
+        if self.unlock_exclude:
+            d['unlockExcludeIndustries'] = list(self.unlock_exclude)
+        if self.unlock_include:
+            d['unlockIncludeIndustries'] = list(self.unlock_include)
+        if self.unlock_include_components:
+            d['unlockIncludeIndustryComponents'] = list(
+                self.unlock_include_components
+            )
+        return d
+
+
+def _native_delivery_phases(phases) -> list:
+    result = []
+    for phase in phases or []:
+        if not isinstance(phase, dict):
+            continue
+        native = _copy.deepcopy(phase)
+        if 'industryComponent' in native and 'industryComponentId' not in native:
+            native['industryComponentId'] = native.pop('industryComponent')
+        deliveries = []
+        for delivery in native.get('deliveries', []) or []:
+            if not isinstance(delivery, dict):
+                continue
+            item = _copy.deepcopy(delivery)
+            if 'load' in item and 'loadId' not in item:
+                item['loadId'] = item.pop('load')
+            direction = str(item.get('direction', 'loadToIndustry')).lower()
+            if direction in ('0', 'to', 'toindustry', 'import'):
+                item['direction'] = 'loadToIndustry'
+            elif direction in ('1', 'from', 'fromindustry', 'export'):
+                item['direction'] = 'loadFromIndustry'
+            deliveries.append(item)
+        if deliveries:
+            native['deliveries'] = deliveries
+        elif 'deliveries' in native:
+            native['deliveries'] = []
+        result.append(native or {'cost': 0})
+    return result
 
 
 class AreaIndustry:
@@ -173,12 +265,20 @@ class ProgressionProject:
         for layer in self.mod.layers:
             if layer.path.name.lower() == filename.lower():
                 return layer
+        if filename.lower() == 'progressions.json':
+            for layer in self.mod.layers:
+                if layer.is_fuse_native and not layer.read_only:
+                    return layer
         return None
 
     def _load_progressions(self):
         if not self._prog_layer:
             return
-        d = self._prog_layer._raw
+        raw = self._prog_layer._raw
+        d = (
+            raw.get('progression') or {}
+            if self._prog_layer.is_fuse_native else raw
+        )
         for fid, fv in (d.get('mapFeatures') or {}).items():
             if fv:
                 self.features[fid] = MapFeature(fid, fv)
@@ -188,6 +288,12 @@ class ProgressionProject:
                 for sid, sv in (pv.get('sections') or {}).items():
                     if sv:
                         self.sections[sid] = ProgressionSection(sid, sv)
+        for section in d.get('sections', []) or []:
+            if not isinstance(section, dict):
+                continue
+            sid = str(section.get('id', '') or '').strip()
+            if sid:
+                self.sections[sid] = ProgressionSection(sid, section)
 
     def _load_areas(self):
         for li, layer in enumerate(self.mod.layers):
@@ -203,8 +309,43 @@ class ProgressionProject:
         """Write back progressions.json."""
         if not self._prog_layer:
             return
-        # Reconstruct raw
         raw = self._prog_layer._raw
+        if self._prog_layer.is_fuse_native:
+            progression = raw.setdefault('progression', {})
+            progression['mapFeatures'] = {
+                fid: feature.to_native_dict()
+                for fid, feature in self.features.items()
+            }
+            progs = progression.get('progressions') or {}
+            if not progs:
+                progression_id = str(
+                    progression.get('progressionId')
+                    or raw.get('id')
+                    or 'progression'
+                )
+                progs = {progression_id: {}}
+            new_progs = {}
+            for pid, existing_prog in progs.items():
+                existing_prog = dict(existing_prog or {})
+                existing_prog = {
+                    key: value for key, value in existing_prog.items()
+                    if key != 'sections'
+                }
+                existing_prog['sections'] = {
+                    sid: section.to_native_dict()
+                    for sid, section in self.sections.items()
+                }
+                new_progs[pid] = existing_prog
+            progression['progressions'] = new_progs
+            progression.pop('sections', None)
+            raw.pop('mapFeatures', None)
+            raw.pop('progressions', None)
+            self._prog_layer.dirty = True
+            self._prog_layer.save()
+            self.dirty = False
+            return
+
+        # Reconstruct legacy progressions.json.
         # mapFeatures
         raw['mapFeatures'] = {fid: f.to_dict()
                                for fid, f in self.features.items()}
@@ -233,11 +374,25 @@ class ProgressionProject:
             return
         layer = self.mod.layers[li]
         area  = self.areas[area_id]
-        layer.areas[area_id] = area.to_dict()
-        # Also update raw
-        if 'areas' not in layer._raw:
-            layer._raw['areas'] = {}
-        layer._raw['areas'][area_id] = area.to_dict()
+        payload = area.to_dict()
+        layer.areas[area_id] = payload
+        # The desktop application performs the full native area/industry split
+        # before calling this method. Keep this direct API schema-safe for area
+        # metadata instead of recreating a root-level RailLoader areas block.
+        if layer.is_fuse_native:
+            native_area = {
+                key: _copy.deepcopy(value)
+                for key, value in payload.items()
+                if key in (
+                    'name', 'position', 'radius', 'tagColor', 'order',
+                    'spanIds', 'groupId',
+                ) and not (
+                    key == 'groupId' and not str(value or '').strip()
+                )
+            }
+            layer.raw_collection('areas', create=True)[area_id] = native_area
+        else:
+            layer.raw_collection('areas', create=True)[area_id] = payload
         layer.dirty = True
         layer.save()
 
@@ -299,4 +454,3 @@ class ProgressionProject:
         for sid in self.sections:
             visit(sid)
         return [self.sections[sid] for sid in visited if sid in self.sections]
-

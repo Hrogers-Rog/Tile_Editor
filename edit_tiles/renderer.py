@@ -10,7 +10,7 @@ from .constants import (
     PANEL_SECTION_BG, PANEL_SECTION_BORDER,
     PANEL_H, TOOLBAR_H, STATUS_H, TILE_STRIDE,
     BRUSH_COLORS, BTN_BORDER, BTN_HOVER_C, BTN_INACTIVE,
-    VEG_COLORS, VEG_NAMES,
+    VEG_COLORS, VEG_NAMES, VEG_DESCRIPTIONS,
     _MOD_AVAILABLE, _BRIDGE_AVAILABLE,
 )
 
@@ -2287,6 +2287,13 @@ class DrawMixin:
                 tbx += 8
                 self.font_big.render_to(self.screen, (tbx, tby_mid + 6),
                     VEG_NAMES[self.veg_preset], pygame.Color(*VEG_COLORS[self.veg_preset]))
+                description_x = tbx + self.font_big.get_rect(
+                    VEG_NAMES[self.veg_preset]).width + 10
+                self.font.render_to(
+                    self.screen,
+                    (description_x, tby_mid + 8),
+                    VEG_DESCRIPTIONS[self.veg_preset],
+                    TEXT_SOFT)
 
             elif self.mode == 'water':
                 self.font_big.render_to(self.screen, (tbx, tby_mid + 6),

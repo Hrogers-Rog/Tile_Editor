@@ -6,6 +6,7 @@ using System.Linq;
 using System.Reflection;
 using Helpers;
 using Map.Runtime;
+using Newtonsoft.Json.Linq;
 using UnityEngine;
 
 namespace Hrogers.TileEditorBridge
@@ -451,7 +452,9 @@ namespace Hrogers.TileEditorBridge
                 return "No terrain changes to save";
             var saved = 0;
             var requiresFullRebuild = false;
+            var deferredOverrides = 0;
             var savedKeys = new List<Vector2Int>();
+            var reloadKeys = new List<Vector2Int>();
             foreach (var key in _dirtyTerrainTiles.ToArray())
             {
                 if (!manager.TryGetTerrain(key, out var mapTerrain)
@@ -471,8 +474,36 @@ namespace Hrogers.TileEditorBridge
                     mapTerrain.tileData,
                     outputPath);
                 mapTerrain.tileData.Dirty = false;
-                requiresFullRebuild |= createdOverride;
+                var writesOverride = !PathsEqual(
+                    sourcePath,
+                    outputPath);
+                var canReload = true;
+                if (writesOverride)
+                {
+                    var modDirectory = FindOwningModDirectory();
+                    var sourceId = EnsureTerrainTileDeclaration(
+                        modDirectory,
+                        manager.directoryName,
+                        Path.GetDirectoryName(outputPath));
+                    canReload = TryRegisterTerrainTileSource(
+                        modDirectory,
+                        sourceId,
+                        manager.directoryName,
+                        Path.GetDirectoryName(outputPath));
+                    if (canReload)
+                        requiresFullRebuild = true;
+                    else
+                        deferredOverrides++;
+                }
+                else if (createdOverride)
+                {
+                    // Defensive fallback: a newly created current source
+                    // still needs the store rebuilt before it can be read.
+                    requiresFullRebuild = true;
+                }
                 savedKeys.Add(key);
+                if (canReload)
+                    reloadKeys.Add(key);
                 _lastSavedTerrainPaths.Add(outputPath);
                 saved++;
             }
@@ -489,14 +520,24 @@ namespace Hrogers.TileEditorBridge
             }
             else
             {
-                foreach (var key in savedKeys)
+                foreach (var key in reloadKeys)
                     manager.Invalidate(key);
             }
-            return "Saved and rebuilt "
+            return "Saved "
                    + saved.ToString(
                        CultureInfo.InvariantCulture)
                    + " terrain tile"
-                   + (saved == 1 ? string.Empty : "s");
+                   + (saved == 1 ? string.Empty : "s")
+                   + (deferredOverrides == 0
+                       ? " and refreshed the terrain"
+                       : "; kept the live edit visible, but restart the map "
+                         + "to mount "
+                         + deferredOverrides.ToString(
+                             CultureInfo.InvariantCulture)
+                         + " new override"
+                         + (deferredOverrides == 1
+                             ? string.Empty
+                             : "s"));
         }
 
         internal string ReloadTerrainTilesFromDesktop(
@@ -852,13 +893,21 @@ namespace Hrogers.TileEditorBridge
                     var target = brush.Mode == TerrainBrushMode.Water
                         ? waterTarget
                         : vegetationTarget;
-                    var value = (byte)Mathf.RoundToInt(
-                        Mathf.Lerp(
-                            old,
-                            target,
-                            Mathf.Clamp01(
-                                brush.Strength * falloff)));
-                    if (value == old)
+
+                    // Vegetation and water are categorical in Railroader's
+                    // tile format (three bits and one bit respectively).
+                    // Blending their unpacked byte values creates a value
+                    // that looks changed in the live texture but can quantize
+                    // straight back to the old category when the tile is
+                    // saved. Use strength to control the covered part of the
+                    // falloff, then write the exact persistable category.
+                    if (!ShouldApplyCategoricalMask(
+                            falloff,
+                            brush.Strength))
+                    {
+                        continue;
+                    }
+                    if (target == old)
                         continue;
                     var values = brush.Mode
                                  == TerrainBrushMode.Water
@@ -866,7 +915,7 @@ namespace Hrogers.TileEditorBridge
                         : before.Vegetation;
                     if (!values.ContainsKey(index))
                         values[index] = old;
-                    pixels[index] = value;
+                    pixels[index] = target;
                     changed++;
                 }
             }
@@ -876,6 +925,15 @@ namespace Hrogers.TileEditorBridge
                 tile.SetMask(maskName, texture);
             }
             return changed;
+        }
+
+        private static bool ShouldApplyCategoricalMask(
+            float falloff,
+            float strength)
+        {
+            var coverage = Mathf.Clamp01(strength);
+            return coverage > 0f
+                   && Mathf.Clamp01(falloff) >= 1f - coverage;
         }
 
         private static float TerrainBrushWeight(
@@ -1122,6 +1180,170 @@ namespace Hrogers.TileEditorBridge
                 FormatTerrainTileName(key));
             createdOverride = !File.Exists(path);
             return path;
+        }
+
+        private string EnsureTerrainTileDeclaration(
+            string modDirectory,
+            string mapDirectory,
+            string tileFolder)
+        {
+            var packageId = ReadOwningPackageId(modDirectory);
+            if (string.IsNullOrWhiteSpace(packageId))
+            {
+                throw new InvalidOperationException(
+                    "The owning package ID could not be read from Info.json "
+                    + "or Definition.json.");
+            }
+
+            var sourceId = packageId
+                           + ":tiles:"
+                           + NormalizeTerrainSourceId(mapDirectory);
+            if (!_fuseNativeDocument || _document == null)
+                return sourceId;
+
+            if (!( _document["world"] is JObject world))
+            {
+                world = new JObject();
+                _document["world"] = world;
+            }
+            if (!(world["mapTiles"] is JObject mapTiles))
+            {
+                mapTiles = new JObject();
+                world["mapTiles"] = mapTiles;
+            }
+
+            var sourceFolder = RelativePackagePath(
+                modDirectory,
+                tileFolder);
+            var expected = new JObject
+            {
+                ["directory"] = mapDirectory,
+                ["sourceFolder"] = sourceFolder,
+                ["priority"] = 100,
+            };
+            if (JToken.DeepEquals(mapTiles[sourceId], expected))
+                return sourceId;
+
+            mapTiles[sourceId] = expected;
+            _dirty = true;
+            Save();
+            return sourceId;
+        }
+
+        private bool TryRegisterTerrainTileSource(
+            string modDirectory,
+            string sourceId,
+            string mapDirectory,
+            string tileFolder)
+        {
+            try
+            {
+                var packageId = ReadOwningPackageId(modDirectory);
+                var mapApi = FindLoadedType("FUSE.Runtime.API.MapAPI");
+                var method = mapApi?.GetMethods(
+                        BindingFlags.Public | BindingFlags.Static)
+                    .FirstOrDefault(candidate =>
+                        string.Equals(
+                            candidate.Name,
+                            "RegisterMapTileSource",
+                            StringComparison.Ordinal)
+                        && candidate.GetParameters().Length == 6);
+                if (method == null
+                    || string.IsNullOrWhiteSpace(packageId))
+                {
+                    return false;
+                }
+
+                method.Invoke(
+                    null,
+                    new object[]
+                    {
+                        packageId,
+                        modDirectory,
+                        sourceId,
+                        mapDirectory,
+                        RelativePackagePath(modDirectory, tileFolder),
+                        100,
+                    });
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _logger?.Warning(
+                    "Could not hot-mount terrain tile source: " + ex);
+                return false;
+            }
+        }
+
+        private static string ReadOwningPackageId(string modDirectory)
+        {
+            if (string.IsNullOrWhiteSpace(modDirectory))
+                return string.Empty;
+            foreach (var name in new[] { "Info.json", "Definition.json" })
+            {
+                var path = Path.Combine(modDirectory, name);
+                if (!File.Exists(path))
+                    continue;
+                try
+                {
+                    var manifest = JObject.Parse(File.ReadAllText(path));
+                    return ((string)manifest["Id"]
+                            ?? (string)manifest["id"]
+                            ?? string.Empty).Trim();
+                }
+                catch
+                {
+                    // The graph loader reports malformed package JSON. Keep
+                    // this helper focused on locating a usable owner ID.
+                }
+            }
+            return string.Empty;
+        }
+
+        private static string RelativePackagePath(
+            string packageFolder,
+            string childFolder)
+        {
+            var package = Path.GetFullPath(packageFolder)
+                .TrimEnd(Path.DirectorySeparatorChar)
+                + Path.DirectorySeparatorChar;
+            var child = Path.GetFullPath(childFolder);
+            if (!child.StartsWith(
+                    package,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException(
+                    "Terrain tile output must stay inside the owning package.");
+            }
+            return child.Substring(package.Length)
+                .Replace(Path.DirectorySeparatorChar, '/');
+        }
+
+        private static string NormalizeTerrainSourceId(string value)
+        {
+            var text = (value ?? "map")
+                .Trim()
+                .ToLowerInvariant();
+            return new string(
+                text.Select(character =>
+                        char.IsLetterOrDigit(character)
+                            ? character
+                            : '-')
+                    .ToArray())
+                .Trim('-');
+        }
+
+        private static bool PathsEqual(string first, string second)
+        {
+            if (string.IsNullOrWhiteSpace(first)
+                || string.IsNullOrWhiteSpace(second))
+            {
+                return false;
+            }
+            return string.Equals(
+                Path.GetFullPath(first),
+                Path.GetFullPath(second),
+                StringComparison.OrdinalIgnoreCase);
         }
 
         private void BackupTerrainTile(
